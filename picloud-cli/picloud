@@ -1,0 +1,701 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# picloud — színes terminál-dashboard az otthoni Pi-szerverhez.
+# Egy SSH-hívással lekéri a szolgáltatások, rendszer és Tailscale állapotát,
+# majd szépen kirajzolja. A `--host local` a saját gépeden futtatja ugyanezt.
+#
+#   picloud                 # alapból a "picloud" SSH-hostot nézi
+#   picloud --host local    # a helyi gépet
+#   picloud --watch 5       # 5 mp-enként frissít
+#   picloud --services csevego,tailscaled,sshd
+
+require "optparse"
+require "io/console"
+require "json"
+
+# ----------------------------------------------------------------------------
+# Beállítások
+# ----------------------------------------------------------------------------
+opts = {
+  host: ENV["PICLOUD_HOST"] || "picloud",
+  hosts: nil,
+  services: nil,
+  watch: nil,
+  color: $stdout.tty?,
+  top: 3,
+  json: false,
+  log: nil,
+}
+
+OptionParser.new do |o|
+  o.banner = "Használat: picloud [opciók]"
+  o.on("--host HOST", "SSH-host (vagy 'local' a helyi gépre), vesszővel több is. Alap: picloud") { |v| opts[:host] = v }
+  o.on("-a", "--all", "Minden gép egyszerre (PICLOUD_HOSTS, alap: picloud,nagy)") { opts[:hosts] = (ENV["PICLOUD_HOSTS"] || "picloud,nagy").split(",") }
+  o.on("--services A,B,C", Array, "Figyelt systemd szolgáltatások") { |v| opts[:services] = v }
+  o.on("--top N", Integer, "N legnagyobb CPU-fogyasztó folyamat (0 = ki). Alap: 3") { |v| opts[:top] = v }
+  o.on("--watch N", Integer, "Frissítés N másodpercenként") { |v| opts[:watch] = v }
+  o.on("--json", "Nyers adat JSON-ként (dobozrajz helyett)") { opts[:json] = true }
+  o.on("--log FILE", "Minden lekérdezést CSV-sorként a FILE-hoz fűz") { |v| opts[:log] = v }
+  o.on("--no-color", "Színek kikapcsolása") { opts[:color] = false }
+  o.on("-h", "--help", "Súgó") { puts o; exit }
+end.parse!(ARGV)
+
+# ----------------------------------------------------------------------------
+# Színek (tiszta ANSI, nincs gem-függőség)
+# ----------------------------------------------------------------------------
+module C
+  CODES = {
+    reset: 0, bold: 1, dim: 2,
+    red: 31, green: 32, yellow: 33, blue: 34, magenta: 35, cyan: 36, gray: 90,
+  }.freeze
+  @enabled = true
+  class << self
+    attr_accessor :enabled
+    def paint(str, *styles)
+      return str.to_s unless @enabled
+      pre = styles.map { |s| "\e[#{CODES[s]}m" }.join
+      "#{pre}#{str}\e[0m"
+    end
+  end
+end
+%i[reset bold dim red green yellow blue magenta cyan gray].each do |name|
+  define_method(name) { |s| C.paint(s, name) }
+end
+
+# ----------------------------------------------------------------------------
+# Távoli / helyi parancsvégrehajtás
+# ----------------------------------------------------------------------------
+# Egyetlen probe-szkriptet futtatunk, ami KEY=VALUE sorokat ír ki. Így egy
+# SSH-körrel megvan minden adat.
+PROBE = <<~'SH'
+  echo "HOST=$(hostname 2>/dev/null)"
+  echo "KERNEL=$(uname -r 2>/dev/null)"
+  echo "UPTIME=$(uptime -p 2>/dev/null | sed 's/^up //')"
+  echo "LOAD=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+  if command -v vcgencmd >/dev/null 2>&1; then
+    echo "TEMP=$(vcgencmd measure_temp 2>/dev/null | grep -oE '[0-9.]+')"
+  elif [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+    echo "TEMP=$(awk '{printf "%.1f", $1/1000}' /sys/class/thermal/thermal_zone0/temp)"
+  fi
+  free -m 2>/dev/null | awk '/^Mem:/{print "MEM_TOTAL="$2; print "MEM_USED="$3}'
+  df -h / 2>/dev/null | awk 'NR==2{print "DISK_TOTAL="$2; print "DISK_USED="$3; print "DISK_PCT="$5}'
+  ps -eo pcpu=,comm= --sort=-pcpu 2>/dev/null | head -n 5 | awk '{c=$1; $1=""; sub(/^ /,""); print "PROC="c"\t"$0}'
+  __SVCLIST__
+  if command -v tailscale >/dev/null 2>&1; then
+    tailscale status 2>/dev/null | while IFS= read -r line; do echo "TS=$line"; done
+    echo "TS_IP=$(tailscale ip -4 2>/dev/null | head -1)"
+  fi
+  echo "NOW=$(date '+%Y-%m-%d %H:%M:%S')"
+  echo "TZ=$(timedatectl show -p Timezone --value 2>/dev/null)"
+  echo "NTP=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)"
+  [ -r /proc/device-tree/model ] && echo "MODEL=$(tr -d '\0' < /proc/device-tree/model)"
+  if command -v vcgencmd >/dev/null 2>&1; then
+    echo "VOLT=$(vcgencmd measure_volts core 2>/dev/null | grep -oE '[0-9.]+')"
+    echo "THROTTLED=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)"
+    vcgencmd pmic_read_adc 2>/dev/null | awk '{split($2,p,"="); n=$1; sub(/_[AV]$/,"",n); if ($2 ~ /^current/) a[n]=p[2]+0; else if ($2 ~ /^volt/) v[n]=p[2]+0} END {for (k in a) if (k in v) s+=a[k]*v[k]; if (s>0) printf "POWER_MEAS=%.2f\n", s}'
+  fi
+  f=/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq
+  [ -r "$f" ] && echo "CPU_MHZ=$(( $(cat "$f") / 1000 ))"
+  echo "CPU_CORES=$(nproc 2>/dev/null)"
+  NETDEV=$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+  GW=$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<NF;i++) if ($i=="via") {print $(i+1); exit}}')
+  netb() { cat "/sys/class/net/$NETDEV/statistics/$1" 2>/dev/null || echo 0; }
+  read -r _ u1 n1 s1 i1 w1 q1 sq1 st1 _ < /proc/stat
+  rx1=$(netb rx_bytes); tx1=$(netb tx_bytes)
+  sleep 1
+  read -r _ u2 n2 s2 i2 w2 q2 sq2 st2 _ < /proc/stat
+  rx2=$(netb rx_bytes); tx2=$(netb tx_bytes)
+  tot=$(( (u2+n2+s2+i2+w2+q2+sq2+st2) - (u1+n1+s1+i1+w1+q1+sq1+st1) ))
+  idl=$(( (i2+w2) - (i1+w1) ))
+  [ "$tot" -gt 0 ] && echo "CPU_PCT=$(( 100 * (tot - idl) / tot ))"
+  if [ -n "$NETDEV" ]; then
+    echo "NET_DEV=$NETDEV"
+    echo "NET_GW=$GW"
+    echo "NET_IP=$(ip -4 -o addr show dev "$NETDEV" 2>/dev/null | awk 'NR==1{print $4}')"
+    echo "NET_IP6=$(ip -6 -o addr show dev "$NETDEV" scope global 2>/dev/null | awk 'NR==1{print $4}')"
+    echo "NET_RATE=$((rx2 - rx1))|$((tx2 - tx1))"
+    echo "NET_TOTAL=$rx2|$tx2"
+  fi
+  pc="/tmp/.picloud-pubip-$(id -u)"
+  if [ ! -s "$pc" ] || [ $(( $(date +%s) - $(stat -c %Y "$pc" 2>/dev/null || echo 0) )) -gt 600 ]; then
+    curl -s -m3 https://api.ipify.org > "$pc.uj" 2>/dev/null && grep -qE '^[0-9a-f.:]+$' "$pc.uj" && mv "$pc.uj" "$pc"
+    rm -f "$pc.uj"
+  fi
+  [ -s "$pc" ] && echo "PUB_IP=$(cat "$pc")"
+  hs=$(ip -4 -o addr 2>/dev/null | awk '$4 ~ /^10\.42\.[0-9]+\.1\// {print $2; exit}')
+  if [ -n "$hs" ]; then
+    echo "HOTSPOT=$hs|$(ip neigh show dev "$hs" 2>/dev/null | grep -E 'REACHABLE|STALE|DELAY|PROBE' | grep -c '^10\.42\.')"
+  fi
+  if [ -r /etc/ventilator.conf ] && command -v pinctrl >/dev/null 2>&1; then
+    g=$(awk -F= '/^GPIO=/{print $2}' /etc/ventilator.conf)
+    pinctrl get "$g" 2>/dev/null | grep -q '| hi' && echo "FAN=be" || echo "FAN=ki"
+  fi
+  lsblk -dno TRAN,RM 2>/dev/null | awk '$1=="usb" {if ($2==1) r++; else f++} END {print "USB_DISKS=" r+0 "|" f+0}'
+  findmnt -rno TARGET 2>/dev/null | grep "^${PICLOUD_TAROLOK:-/srv/tarolok}/" | while read -r m; do
+    df -B1 --output=used,size "$m" 2>/dev/null | awk -v n="${m##*/}" 'NR==2 && $2 > 1e9 {print "STOR=" n "|" $1 "|" $2}'
+  done
+  sdb="${PICLOUD_SPEEDTEST_DB:-/srv/szerverpark/adat/speedtest/database.sqlite}"
+  if [ -r "$sdb" ] && command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 -readonly -separator '|' "$sdb" "select download, upload, ping, created_at from results where status='completed' order by id desc limit 1" 2>/dev/null | sed 's/^/SPEED=/'
+  fi
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    echo "DOCKER=$(docker ps -q | wc -l)|$(docker ps -aq | wc -l)"
+    if docker ps --format '{{.Names}}' | grep -qx pihole; then
+      docker exec pihole pihole-FTL sqlite3 -readonly -separator '|' /etc/pihole/pihole-FTL.db "select count(*), coalesce(sum(status in (1,4,5,6,7,8,9,10,11,15,16)),0) from queries where timestamp > strftime('%s','now','localtime','start of day','utc')" 2>/dev/null | sed 's/^/PIHOLE=/'
+    fi
+  fi
+SH
+
+def build_probe(services)
+  svc = services.map do |s|
+    name = s.gsub(/[^\w.@-]/, "")
+    %(echo "SVC:#{name}=$(systemctl is-active #{name} 2>/dev/null || echo unknown)")
+  end.join("\n")
+  PROBE.sub("__SVCLIST__", svc)
+end
+
+def gather(host, services)
+  script = build_probe(services)
+  cmd =
+    if host == "local"
+      ["bash", "-c", script]
+    else
+      # BatchMode: ne kérjen jelszót; gyors timeout, hogy ne lógjon be.
+      ["ssh", "-o", "ConnectTimeout=6", "-o", "BatchMode=yes", host, "bash -s"]
+    end
+
+  # A stderr-t a kimenetbe olvasztjuk: így nem szivárog a terminálra, és hiba
+  # esetén a valódi ok (pl. "connection timed out") jelenik meg a dobozban.
+  out =
+    if host == "local"
+      IO.popen(cmd, err: %i[child out], &:read)
+    else
+      IO.popen(cmd, "r+", err: %i[child out]) { |io| io.write(script); io.close_write; io.read }
+    end
+
+  ok = $?.success?
+  [ok, out.to_s]
+end
+
+def parse(raw)
+  data = { services: {}, tailscale: [], procs: [] }
+  raw.each_line do |line|
+    line = line.chomp
+    if line.start_with?("SVC:")
+      k, v = line[4..].split("=", 2)
+      data[:services][k] = v
+    elsif line.start_with?("TS=")
+      data[:tailscale] << line[3..]
+    elsif line.start_with?("STOR=")
+      name, used, size = line[5..].split("|")
+      (data[:storage] ||= []) << { name: name, used: used.to_i, size: size.to_i }
+    elsif line.start_with?("PROC=")
+      cpu, name = line[5..].split("\t", 2)
+      next if name.nil? || name.strip.empty?
+      data[:procs] << { cpu: cpu.to_f, name: name.strip }
+    elsif line.include?("=")
+      k, v = line.split("=", 2)
+      data[k.downcase.to_sym] = v
+    end
+  end
+  data
+end
+
+# ----------------------------------------------------------------------------
+# Tailscale-sorok értelmezése
+# ----------------------------------------------------------------------------
+def parse_tailscale(lines)
+  lines.filter_map do |l|
+    next if l.strip.empty?
+    parts = l.split(/\s+/)
+    next if parts.size < 4
+    next unless parts[0].match?(/\A\d{1,3}(\.\d{1,3}){3}\z/) # csak valódi peer-sorok
+    ip, host, _user, os = parts[0..3]
+    rest = parts[4..].join(" ")
+    online =
+      if l.include?("offline")
+        false
+      elsif rest.empty? || rest == "-" || l.include?("active") || l.include?("idle")
+        true
+      else
+        true
+      end
+    { ip: ip, host: host, os: os, online: online, self: false }
+  end
+end
+
+# ----------------------------------------------------------------------------
+# Kirajzolás
+# ----------------------------------------------------------------------------
+WIDTH = 54
+
+def strip_ansi(str)
+  str.to_s.gsub(/\e\[[0-9;]*m/, "")
+end
+
+def rule(left, right, label = nil)
+  if label
+    lbl_vis = strip_ansi(label).length + 2 # a két körülvevő szóköz
+    dash = WIDTH - 1 - lbl_vis
+    dash = 0 if dash.negative?
+    "#{left}─ #{label} #{'─' * dash}#{right}"
+  else
+    "#{left}#{'─' * WIDTH}#{right}"
+  end
+end
+
+def row(text, plain_len)
+  pad = WIDTH - plain_len - 1
+  pad = 0 if pad.negative?
+  "#{gray('│')} #{text}#{' ' * pad}#{gray('│')}"
+end
+
+def temp_color(t)
+  return :gray unless t
+  f = t.to_f
+  return :green  if f < 55
+  return :yellow if f < 70
+  :red
+end
+
+def pct_color(p)
+  n = p.to_s.gsub("%", "").to_f
+  return :green  if n < 60
+  return :yellow if n < 85
+  :red
+end
+
+FT_PER_KWH = (ENV["PICLOUD_FT_KWH"] || "36").to_f
+
+def human_bytes(n, suffix = "")
+  n = n.to_f
+  units = %w[B kB MB GB TB]
+  i = 0
+  while n >= 1000 && i < units.size - 1
+    n /= 1000
+    i += 1
+  end
+  fmt = n < 10 && i.positive? ? "%.1f" : "%.0f"
+  "#{format(fmt, n)} #{units[i]}#{suffix}"
+end
+
+def hu_num(x, digits = 1)
+  format("%.#{digits}f", x).tr(".", ",")
+end
+
+def split_pipe(v)
+  v.to_s.split("|")
+end
+
+def power_info(d)
+  if d[:power_meas]
+    return { watt: d[:power_meas].to_f, measured: true }
+  end
+  return nil unless d[:model].to_s.include?("Raspberry Pi 4")
+
+  cpu = d[:cpu_pct].to_f.clamp(0, 100)
+  removable, fixed = split_pipe(d[:usb_disks]).map(&:to_i)
+  w = 2.7 + 3.7 * cpu / 100.0
+  w += 0.3 * removable.to_i + 1.5 * fixed.to_i
+  w += 0.4 if d[:hotspot]
+  w += 0.5 if d[:fan] == "be"
+  { watt: w, measured: false }
+end
+
+THROTTLE_BITS = {
+  0x1 => "alulfeszültség MOST",
+  0x2 => "frekvencia-korlát MOST",
+  0x4 => "fojtás MOST",
+  0x8 => "hőkorlát MOST",
+  0x10000 => "volt alulfeszültség",
+  0x40000 => "volt fojtás",
+  0x80000 => "volt hőkorlát",
+}.freeze
+
+def throttle_info(raw)
+  return nil if raw.to_s.empty?
+  v = raw.to_i(16)
+  return [:ok, "rendben"] if v.zero?
+  msgs = THROTTLE_BITS.select { |bit, _| (v & bit).nonzero? }.values
+  [(v & 0xF).nonzero? ? :err : :warn, msgs.first(2).join(", ")]
+end
+
+def speed_info(raw)
+  dl, ul, ping, at = split_pipe(raw)
+  return nil unless dl && ul
+  { down: dl.to_f * 8 / 1e6, up: ul.to_f * 8 / 1e6, ping: ping.to_f, at: at.to_s[0, 16] }
+end
+
+def health_status(data)
+  level = :ok
+  reasons = []
+  bump = lambda do |lvl, why|
+    order = { ok: 0, warn: 1, err: 2 }
+    if order[lvl] > order[level]
+      level = lvl
+    end
+    reasons << why if lvl != :ok
+  end
+
+  if data[:temp]
+    t = data[:temp].to_f
+    bump.call(:err, "hőmérséklet #{t} °C") if t >= 80
+    bump.call(:warn, "meleg #{t} °C") if t >= 70 && t < 80
+  end
+  if data[:mem_total]
+    used = data[:mem_used].to_i
+    total = data[:mem_total].to_i
+    pc = total.zero? ? 0 : (used * 100.0 / total).round
+    bump.call(:err, "RAM #{pc}%") if pc >= 90
+    bump.call(:warn, "RAM #{pc}%") if pc >= 85 && pc < 90
+  end
+  if data[:disk_pct]
+    d = data[:disk_pct].to_s.gsub("%", "").to_f
+    bump.call(:err, "disk #{d.round}%") if d >= 95
+    bump.call(:warn, "disk #{d.round}%") if d >= 90 && d < 95
+  end
+  if (th = throttle_info(data[:throttled])) && th[0] != :ok
+    bump.call(th[0], th[1])
+  end
+  data[:services].each do |svc, st|
+    bump.call(:err, "#{svc} failed") if st == "failed"
+    bump.call(:warn, "#{svc} #{st}") if st != "active" && st != "failed"
+  end
+
+  [level, reasons]
+end
+
+STATUS_META = {
+  ok:   ["●", :green,  "OK"],
+  warn: ["▲", :yellow, "figyelmeztetés"],
+  err:  ["✗", :red,    "hiba"],
+}.freeze
+
+def render(host, data, top = 3)
+  lines = []
+  name = data[:host] || host
+  lines << gray(rule("┌", "┐", cyan("#{name}")))
+
+  kv = lambda do |label, txt, col = nil, note = nil|
+    txt = txt.to_s
+    note_s = note ? " #{note}" : ""
+    avail = WIDTH - 11 - note_s.length
+    txt = txt[0, avail] if avail.positive? && txt.length > avail
+    val = col ? C.paint(txt, col) : txt
+    lines << row("#{bold(label.ljust(8))} #{val}#{dim(note_s)}", 9 + txt.length + note_s.length)
+  end
+  section = ->(title) { lines << gray(rule("├", "┤", title)) }
+
+  # --- Rendszer ---
+  kv.call("Model", data[:model].sub("Raspberry Pi", "RPi")) if data[:model]
+  if data[:now]
+    ntp = data[:ntp] == "yes" ? C.paint("NTP ✓", :green) : C.paint("NTP ✗", :yellow)
+    tz = data[:tz].to_s.empty? ? "" : " #{data[:tz].split('/').last}"
+    txt = "#{data[:now]}#{tz}"
+    lines << row("#{bold('Idő'.ljust(8))} #{txt} #{ntp}", 9 + txt.length + 6)
+  end
+  kv.call("Uptime", data[:uptime] || "?")
+  kv.call("Load", data[:load]) if data[:load]
+  if data[:cpu_pct]
+    extra = [data[:cpu_mhz] && "#{data[:cpu_mhz]} MHz", data[:cpu_cores] && "#{data[:cpu_cores]} mag"].compact.join(", ")
+    kv.call("CPU", "#{data[:cpu_pct]}%", pct_color("#{data[:cpu_pct]}%"), extra.empty? ? nil : "(#{extra})")
+  end
+  if data[:temp]
+    fan = data[:fan] ? "(ventilátor #{data[:fan]})" : nil
+    kv.call("Hőmérs.", "#{data[:temp]} °C", temp_color(data[:temp]), fan)
+  end
+  if (th = throttle_info(data[:throttled]))
+    col = { ok: :green, warn: :yellow, err: :red }[th[0]]
+    volt = data[:volt] ? "#{data[:volt]} V · " : ""
+    lines << row("#{bold('Táp'.ljust(8))} #{volt}#{C.paint(th[1], col)}", 9 + volt.length + th[1].length)
+  end
+  if data[:mem_total]
+    used = data[:mem_used].to_i
+    total = data[:mem_total].to_i
+    pc = total.zero? ? 0 : (used * 100.0 / total).round
+    kv.call("RAM", "#{used}/#{total} MB (#{pc}%)", pct_color("#{pc}%"))
+  end
+  if data[:disk_total]
+    kv.call("Disk /", "#{data[:disk_used]}/#{data[:disk_total]} (#{data[:disk_pct]})", pct_color(data[:disk_pct]))
+  end
+
+  if (pw = power_info(data))
+    section.call(pw[:measured] ? "fogyasztás (mért)" : "fogyasztás (becslés)")
+    w = pw[:watt]
+    kv.call("Most", "#{pw[:measured] ? '' : '≈ '}#{hu_num(w, 1)} W", :cyan)
+    day = w * 24 / 1000
+    kv.call("Naponta", "#{hu_num(day, 2)} kWh", nil, "(≈ #{(day * FT_PER_KWH).round} Ft)")
+    kv.call("Havonta", "#{hu_num(day * 30, 1)} kWh", nil, "(≈ #{(day * 30 * FT_PER_KWH).round} Ft)")
+  end
+
+  if data[:net_dev] || data[:pub_ip] || data[:ts_ip]
+    section.call("hálózat")
+    kv.call("LAN", data[:net_ip], nil, "(#{data[:net_dev]})") if data[:net_ip]
+    kv.call("Átjáró", data[:net_gw]) unless data[:net_gw].to_s.empty?
+    kv.call("IPv6", data[:net_ip6].sub(%r{/\d+\z}, "")) unless data[:net_ip6].to_s.empty?
+    kv.call("Tailnet", data[:ts_ip]) unless data[:ts_ip].to_s.empty?
+    kv.call("Publikus", data[:pub_ip]) unless data[:pub_ip].to_s.empty?
+    if data[:net_rate]
+      rx, tx = split_pipe(data[:net_rate])
+      kv.call("Forgalom", "↓ #{human_bytes(rx, '/s')}  ↑ #{human_bytes(tx, '/s')}", :cyan)
+    end
+    if data[:net_total]
+      rx, tx = split_pipe(data[:net_total])
+      kv.call("Boot óta", "↓ #{human_bytes(rx)}  ↑ #{human_bytes(tx)}")
+    end
+    if data[:hotspot]
+      dev, n = split_pipe(data[:hotspot])
+      kv.call("Hotspot", "#{n} kliens", nil, "(#{dev})")
+    end
+  end
+
+  if (sp = speed_info(data[:speed]))
+    section.call("internet (utolsó speedtest)")
+    kv.call("Letölt.", "#{hu_num(sp[:down], 1)} Mbit/s", :green)
+    kv.call("Feltölt.", "#{hu_num(sp[:up], 1)} Mbit/s", :green)
+    kv.call("Ping", "#{hu_num(sp[:ping], 1)} ms", nil, "(#{sp[:at]})")
+  end
+
+  if data[:storage]&.any? || data[:docker] || data[:pihole]
+    section.call("tárolók · docker · pi-hole")
+    (data[:storage] || []).each do |s|
+      pc = s[:size].zero? ? 0 : (s[:used] * 100.0 / s[:size]).round
+      kv.call(s[:name][0, 8], "#{human_bytes(s[:used])}/#{human_bytes(s[:size])} (#{pc}%)", pct_color("#{pc}%"))
+    end
+    if data[:docker]
+      run, all = split_pipe(data[:docker]).map(&:to_i)
+      kv.call("Docker", "#{run}/#{all} konténer fut", run == all ? :green : :yellow)
+    end
+    if data[:pihole]
+      q, b = split_pipe(data[:pihole]).map(&:to_i)
+      pc = q.zero? ? 0 : (b * 100.0 / q)
+      kv.call("Pi-hole", "#{q} kérés, #{b} blokkolva", nil, "(#{hu_num(pc, 1)}% ma)")
+    end
+  end
+
+  # --- Szolgáltatások ---
+  unless data[:services].empty?
+    lines << gray(rule("├", "┤", "szolgáltatások"))
+    data[:services].each do |svc, st|
+      dot, col =
+        case st
+        when "active"   then ["●", :green]
+        when "inactive" then ["○", :gray]
+        when "failed"   then ["✗", :red]
+        else                 ["?", :yellow]
+        end
+      label = "#{C.paint(dot, col)} #{svc}"
+      status = C.paint(st, col)
+      plain = "#{dot} #{svc}#{st}"
+      pad = WIDTH - plain.length - 2
+      pad = 1 if pad < 1
+      lines << row("#{label}#{' ' * pad}#{status}", plain.length + pad)
+    end
+  end
+
+  procs = (data[:procs] || []).reject { |p| p[:name].empty? || p[:name] == "ps" }.first(top)
+  if top.positive? && !procs.empty?
+    lines << gray(rule("├", "┤", "top folyamatok"))
+    procs.each do |p|
+      cpu = format("%.0f%%", p[:cpu])
+      col = pct_color(cpu)
+      nm = p[:name][0, WIDTH - 9]
+      pad = WIDTH - nm.length - cpu.length - 2
+      pad = 1 if pad < 1
+      lines << row("#{nm}#{' ' * pad}#{C.paint(cpu, col)}", nm.length + pad + cpu.length)
+    end
+  end
+
+  # --- Tailscale ---
+  peers = parse_tailscale(data[:tailscale] || []).each { |p| p[:self] = p[:ip] == data[:ts_ip] }
+  unless peers.empty?
+    lines << gray(rule("├", "┤", "tailnet"))
+    peers.first(8).each do |p|
+      dot, col = p[:online] ? ["●", :green] : ["○", :gray]
+      tag = p[:self] ? cyan(" (ez a gép)") : ""
+      hostcol = p[:online] ? p[:host] : dim(p[:host])
+      label = "#{C.paint(dot, col)} #{hostcol}#{tag}"
+      plain = "#{dot} #{p[:host]}#{p[:self] ? ' (ez a gép)' : ''}"
+      iptxt = dim(p[:ip])
+      pad = WIDTH - plain.length - p[:ip].length - 2
+      pad = 1 if pad < 1
+      lines << row("#{label}#{' ' * pad}#{iptxt}", plain.length + pad + p[:ip].length)
+    end
+  end
+
+  level, reasons = health_status(data)
+  dot, col, word = STATUS_META[level]
+  txt = reasons.empty? ? word : "#{word} — #{reasons.first(2).join(', ')}"
+  txt = txt[0, WIDTH - 12]
+  lines << gray(rule("├", "┤", "állapot"))
+  label = "#{C.paint(dot, col)} #{C.paint(txt, col)}"
+  plain = "#{dot} #{txt}"
+  lines << row(label, plain.length)
+
+  lines << gray(rule("└", "┘"))
+  lines.join("\n")
+end
+
+def error_box(host, raw)
+  msg = raw.strip.empty? ? "nincs válasz" : raw.strip.lines.first.strip
+  [
+    gray(rule("┌", "┐", red(host))),
+    row(red("✗ nem elérhető"), "✗ nem elérhető".length),
+    row(dim(msg[0, WIDTH - 3]), msg[0, WIDTH - 3].length),
+    row(dim("tipp: ssh #{host} — működik a kapcsolat?"), "tipp: ssh #{host} — működik a kapcsolat?".length),
+    gray(rule("└", "┘")),
+  ].join("\n")
+end
+
+def build_json(host, reachable, data)
+  peers = parse_tailscale(data[:tailscale] || [])
+  level, reasons = reachable ? health_status(data) : [:err, ["nem elérhető"]]
+  mem_pct =
+    if data[:mem_total] && !data[:mem_total].to_i.zero?
+      (data[:mem_used].to_i * 100.0 / data[:mem_total].to_i).round
+    end
+  {
+    host: data[:host] || host,
+    reachable: reachable,
+    status: level,
+    status_reasons: reasons,
+    uptime: data[:uptime],
+    kernel: data[:kernel],
+    load: data[:load],
+    temp_c: data[:temp]&.to_f,
+    mem_used_mb: data[:mem_used]&.to_i,
+    mem_total_mb: data[:mem_total]&.to_i,
+    mem_pct: mem_pct,
+    disk_used: data[:disk_used],
+    disk_total: data[:disk_total],
+    disk_pct: data[:disk_pct],
+    time: data[:now],
+    timezone: data[:tz],
+    ntp_synced: data[:ntp] == "yes",
+    model: data[:model],
+    cpu_pct: data[:cpu_pct]&.to_i,
+    cpu_mhz: data[:cpu_mhz]&.to_i,
+    core_volt: data[:volt]&.to_f,
+    throttled: data[:throttled],
+    fan: data[:fan],
+    power_w: power_info(data)&.dig(:watt)&.round(2),
+    power_measured: power_info(data)&.dig(:measured),
+    lan_ip: data[:net_ip],
+    ipv6: data[:net_ip6],
+    gateway: data[:net_gw],
+    tailnet_ip: data[:ts_ip],
+    public_ip: data[:pub_ip],
+    net_rate_bps: split_pipe(data[:net_rate]).map(&:to_i),
+    hotspot_clients: data[:hotspot] && split_pipe(data[:hotspot])[1].to_i,
+    speedtest: speed_info(data[:speed]),
+    storage: data[:storage],
+    docker: data[:docker] && split_pipe(data[:docker]).map(&:to_i),
+    pihole_today: data[:pihole] && split_pipe(data[:pihole]).map(&:to_i),
+    services: data[:services],
+    top_procs: data[:procs],
+    tailnet: peers,
+    timestamp: Time.now.to_i,
+  }
+end
+
+LOG_HEADER = "timestamp,host,reachable,status,load1,temp_c,mem_pct,disk_pct,services_up,services_total"
+
+def log_row(path, j)
+  new_file = !File.exist?(path) || File.zero?(path)
+  up = j[:services].count { |_, s| s == "active" }
+  row = [
+    Time.now.strftime("%Y-%m-%dT%H:%M:%S"),
+    j[:host], j[:reachable], j[:status],
+    j[:load]&.split&.first,
+    j[:temp_c], j[:mem_pct],
+    j[:disk_pct]&.to_s&.gsub("%", ""),
+    up, j[:services].size,
+  ].map { |v| v.nil? ? "" : v }.join(",")
+  File.open(path, "a") do |f|
+    f.puts LOG_HEADER if new_file
+    f.puts row
+  end
+end
+
+# ----------------------------------------------------------------------------
+# Fő ciklus
+# ----------------------------------------------------------------------------
+C.enabled = opts[:color]
+
+HOSTS = opts[:hosts] || opts[:host].split(",").map(&:strip).reject(&:empty?)
+DEFAULT_SERVICES = { "picloud" => %w[csevego], "local" => %w[csevego] }.freeze
+
+def services_for(host, override)
+  override || DEFAULT_SERVICES.fetch(host, %w[docker tailscaled])
+end
+
+def probe(host, opts)
+  ok, raw = gather(host, services_for(host, opts[:services]))
+  data = parse(raw)
+  reachable = ok && (!data[:host].nil? || data[:services].any?)
+  box = reachable ? render(host, data, opts[:top]) : error_box(host, raw)
+  { host: host, reachable: reachable, data: data, box: box }
+end
+
+def probe_all(opts)
+  HOSTS.map { |h| Thread.new { probe(h, opts) } }.map(&:value)
+end
+
+def term_cols
+  $stdout.tty? ? IO.console&.winsize&.last.to_i : 0
+end
+
+def layout(results)
+  boxes = results.map { |r| r[:box].split("\n") }
+  gap = "  "
+  if boxes.size > 1 && term_cols >= boxes.size * (WIDTH + 2) + (boxes.size - 1) * gap.length
+    height = boxes.map(&:size).max
+    (0...height).map do |i|
+      boxes.map { |b| line = b[i] || ""; line + " " * [WIDTH + 2 - strip_ansi(line).length, 0].max }.join(gap)
+    end.join("\n")
+  else
+    boxes.map { |b| b.join("\n") }.join("\n\n")
+  end
+end
+
+def exit_code(results, strict_ok)
+  results.map do |r|
+    next 2 unless r[:reachable]
+    lvl = health_status(r[:data]).first
+    strict_ok ? (lvl == :ok ? 0 : 1) : (lvl == :err ? 1 : 0)
+  end.max
+end
+
+def log_all(opts, results)
+  return unless opts[:log]
+  results.each { |r| log_row(opts[:log], build_json(r[:host], r[:reachable], r[:data])) }
+end
+
+if opts[:json]
+  results = probe_all(opts)
+  out = results.map { |r| build_json(r[:host], r[:reachable], r[:data]) }
+  puts JSON.pretty_generate(out.size == 1 ? out.first : out)
+  log_all(opts, results)
+  exit(exit_code(results, false))
+elsif opts[:watch]
+  begin
+    trap("INT") { print "\e[?25h"; puts; exit }
+    print "\e[?25l" # kurzor elrejt
+    loop do
+      results = probe_all(opts)
+      log_all(opts, results)
+      print "\e[2J\e[H" # törlés + home
+      puts layout(results)
+      puts dim("\n frissül #{opts[:watch]} mp-enként · Ctrl-C = kilépés")
+      sleep opts[:watch]
+    end
+  ensure
+    print "\e[?25h"
+  end
+else
+  results = probe_all(opts)
+  puts layout(results)
+  log_all(opts, results)
+  exit(exit_code(results, true))
+end

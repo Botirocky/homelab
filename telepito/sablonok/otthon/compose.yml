@@ -1,0 +1,36 @@
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: park-homeassistant
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+    volumes:
+      - ${ADAT_DIR}/homeassistant:/config
+      - /etc/localtime:/etc/localtime:ro
+      - /run/dbus:/run/dbus:ro
+    environment:
+      TZ: ${TZ}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: park-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ${ADAT_DIR}/mosquitto/config:/mosquitto/config
+      - ${ADAT_DIR}/mosquitto/data:/mosquitto/data
+      - ${ADAT_DIR}/mosquitto/log:/mosquitto/log
+    environment:
+      TZ: ${TZ}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

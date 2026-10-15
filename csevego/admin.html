@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#05070d">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<title>Privát Csevegő — Admin</title>
+<style>
+  :root {
+    --bg: #05070d;
+    --surface: rgba(255,255,255,.045);
+    --surface-2: rgba(255,255,255,.08);
+    --border: rgba(255,255,255,.09);
+    --text: #eef1f8;
+    --muted: #97a0b5;
+    --primary: #2563eb;
+    --primary-2: #6366f1;
+    --accent: #10b981;
+    --warn: #f59e0b;
+    --danger: #ef4444;
+    --grad: linear-gradient(135deg, #2563eb, #4f46e5);
+    --ring: 0 0 0 3px rgba(99,102,241,.45);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+    min-height: 100dvh; display: flex; flex-direction: column;
+  }
+  button { font: inherit; cursor: pointer; }
+  input { font: inherit; }
+  :focus-visible { outline: none; box-shadow: var(--ring); border-radius: 8px; }
+  svg.ic { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
+           stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .aurora { position: fixed; inset: 0; z-index: -1; overflow: hidden; }
+  .aurora::before {
+    content: ""; position: absolute; width: 55vmax; height: 55vmax; border-radius: 50%;
+    filter: blur(90px); opacity: .13; top: -20vmax; right: -15vmax;
+    background: radial-gradient(circle, #7c3aed, transparent 65%);
+  }
+  .glass { background: var(--surface); border: 1px solid var(--border);
+           backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
+
+  #login {
+    margin: auto; border-radius: 20px; padding: 2.2rem 2rem;
+    width: min(92vw, 380px); display: flex; flex-direction: column; gap: .9rem;
+    box-shadow: 0 24px 80px rgba(0,0,0,.55);
+  }
+  #login h1 { font-size: 1.2rem; display: flex; align-items: center; gap: .5rem; }
+  #login p { color: var(--muted); font-size: .84rem; line-height: 1.5; }
+  #login input {
+    background: rgba(0,0,0,.35); border: 1px solid var(--border); color: var(--text);
+    padding: .75rem .95rem; border-radius: 10px; font-size: .95rem;
+  }
+  #login input:focus { border-color: var(--primary-2); outline: none; box-shadow: var(--ring); }
+  #login .err { color: var(--danger); font-size: .82rem; display: none; }
+  .btn { background: var(--grad); border: none; color: #fff; padding: .75rem 1.1rem;
+         border-radius: 10px; font-weight: 600; transition: transform .15s, filter .2s; }
+  .btn:hover { filter: brightness(1.12); }
+  .btn:active { transform: scale(.97); }
+  .btn.sm { padding: .4rem .7rem; font-size: .78rem; border-radius: 8px; }
+  .btn.ghost { background: none; border: 1px solid var(--border); color: var(--muted); }
+  .btn.ghost:hover { color: var(--text); border-color: var(--primary-2); filter: none; }
+  .btn.danger { background: rgba(239,68,68,.15); border: 1px solid rgba(239,68,68,.4); color: #f87171; }
+  .btn.danger:hover { background: rgba(239,68,68,.28); filter: none; }
+
+  #dash { display: none; flex: 1; flex-direction: column; gap: 1rem;
+          padding: 1.2rem; max-width: 1180px; margin: 0 auto; width: 100%; }
+  header { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
+  header h1 { font-size: 1.15rem; display: flex; align-items: center; gap: .5rem; }
+  header h1 svg.ic { color: var(--primary-2); width: 20px; height: 20px; }
+  .badge { display: inline-flex; align-items: center; gap: .35rem; font-size: .72rem;
+           font-weight: 600; padding: .28rem .6rem; border-radius: 999px;
+           border: 1px solid var(--border); background: var(--surface); color: var(--muted); }
+  .badge.ok { color: #34d399; border-color: rgba(52,211,153,.35); }
+  .badge.dev { color: #c4b5fd; border-color: rgba(167,139,250,.45); }
+  header .spacer { margin-left: auto; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .8rem; }
+  .tile { border-radius: 14px; padding: .95rem 1.1rem; }
+  .tile .label { font-size: .74rem; color: var(--muted); margin-bottom: .3rem; }
+  .tile .value { font-size: 1.7rem; font-weight: 600; letter-spacing: -.01em; }
+
+  .grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 1rem; align-items: start; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  section.card { border-radius: 14px; padding: 1rem 1.1rem; display: flex;
+                 flex-direction: column; gap: .7rem; }
+  section.card h2 { font-size: .78rem; letter-spacing: .07em; text-transform: uppercase;
+                    color: var(--muted); display: flex; align-items: center; gap: .45rem; }
+
+  .room { border: 1px solid var(--border); border-radius: 12px; padding: .7rem .8rem;
+          display: flex; flex-direction: column; gap: .5rem; }
+  .room .head { display: flex; align-items: center; gap: .5rem; }
+  .room .head b { font-size: .95rem; }
+  .room .head .meta { color: var(--muted); font-size: .76rem; }
+  .room .head .actions { margin-left: auto; display: flex; gap: .4rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .84rem; }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: .72rem;
+       padding: .25rem .4rem; border-bottom: 1px solid var(--border); }
+  td { padding: .35rem .4rem; border-bottom: 1px solid rgba(255,255,255,.04); }
+  td.ip { color: var(--muted); font-variant-numeric: tabular-nums; }
+  td.act { text-align: right; white-space: nowrap; }
+  .empty { color: var(--muted); font-size: .84rem; font-style: italic; }
+
+  .row { display: flex; gap: .5rem; }
+  .row input { flex: 1; background: rgba(0,0,0,.35); border: 1px solid var(--border);
+               color: var(--text); padding: .6rem .8rem; border-radius: 10px; font-size: .9rem; }
+  .row input:focus { border-color: var(--primary-2); outline: none; box-shadow: var(--ring); }
+
+  .banlist { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .ban { display: inline-flex; align-items: center; gap: .4rem; font-size: .8rem;
+         background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.35);
+         color: #fca5a5; padding: .25rem .4rem .25rem .65rem; border-radius: 999px;
+         font-variant-numeric: tabular-nums; }
+  .ban button { background: none; border: none; color: inherit; display: flex;
+                padding: .1rem; border-radius: 50%; }
+  .ban button:hover { background: rgba(255,255,255,.15); }
+
+  #log { max-height: 340px; overflow-y: auto; display: flex; flex-direction: column;
+         gap: .15rem; font-size: .8rem; }
+  #log .entry { display: flex; gap: .6rem; padding: .18rem .2rem; border-radius: 6px; }
+  #log .entry:hover { background: var(--surface-2); }
+  #log .t { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+  #log .entry.alert { color: #fbbf24; }
+</style>
+</head>
+<body>
+<div class="aurora" aria-hidden="true"></div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <g id="i-shield"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></g>
+  <g id="i-x"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></g>
+  <g id="i-hash"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></g>
+  <g id="i-users"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></g>
+  <g id="i-list"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></g>
+  <g id="i-megaphone"><path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></g>
+  <g id="i-banicon"><circle cx="12" cy="12" r="10"/><line x1="4.9" y1="4.9" x2="19.1" y2="19.1"/></g>
+</defs></svg>
+
+<div id="login" class="glass">
+  <h1><svg class="ic" viewBox="0 0 24 24" style="color:#6366f1"><use href="#i-shield"/></svg>
+      Admin belépés</h1>
+  <p>A tokent a szerver írja ki induláskor, és a <code>.admin_token</code> fájlban
+     is megtalálod a projekt mappájában.</p>
+  <input id="token" type="password" placeholder="Admin token" autocomplete="off" autofocus>
+  <span class="err" id="loginErr">Hibás token.</span>
+  <button class="btn" id="loginBtn">Belépés</button>
+</div>
+
+<div id="dash">
+  <header>
+    <h1><svg class="ic" viewBox="0 0 24 24"><use href="#i-shield"/></svg>
+        Privát Csevegő — admin</h1>
+    <span class="badge dev" id="devBadge" style="display:none">DEV mód</span>
+    <span class="badge" id="connBadge">kapcsolódás…</span>
+    <span class="spacer"></span>
+    <button class="btn ghost sm" id="logoutBtn">Kilépés</button>
+  </header>
+
+  <div class="tiles">
+    <div class="tile glass"><div class="label">Üzemidő</div><div class="value" id="tUptime">—</div></div>
+    <div class="tile glass"><div class="label">Aktív kapcsolat</div><div class="value" id="tConns">—</div></div>
+    <div class="tile glass"><div class="label">Üzenet összesen</div><div class="value" id="tMsgs">—</div></div>
+    <div class="tile glass"><div class="label">Szoba</div><div class="value" id="tRooms">—</div></div>
+  </div>
+
+  <div class="grid">
+    <div style="display:flex;flex-direction:column;gap:1rem">
+      <section class="card glass">
+        <h2><svg class="ic" viewBox="0 0 24 24"><use href="#i-hash"/></svg> Szobák és felhasználók</h2>
+        <div id="rooms"><p class="empty">Most nincs aktív szoba.</p></div>
+      </section>
+
+      <section class="card glass">
+        <h2><svg class="ic" viewBox="0 0 24 24"><use href="#i-megaphone"/></svg> Közlemény minden szobába</h2>
+        <div class="row">
+          <input id="announce" maxlength="500" placeholder="pl. A szerver 5 perc múlva újraindul…">
+          <button class="btn sm" id="announceBtn">Küldés</button>
+        </div>
+      </section>
+
+      <section class="card glass">
+        <h2><svg class="ic" viewBox="0 0 24 24"><use href="#i-banicon"/></svg> Kitiltott IP-címek</h2>
+        <div class="banlist" id="bans"><p class="empty">Nincs kitiltás.</p></div>
+        <div class="row">
+          <input id="banIp" maxlength="45" placeholder="IP-cím kitiltása, pl. 203.0.113.7">
+          <button class="btn danger sm" id="banBtn">Kitiltás</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="card glass">
+      <h2><svg class="ic" viewBox="0 0 24 24"><use href="#i-list"/></svg> Eseménynapló</h2>
+      <div id="log"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let ws = null;
+let authed = false;
+
+function fmtUptime(s) {
+  if (s < 3600) return Math.floor(s / 60) + " p " + (s % 60) + " mp";
+  if (s < 86400) return Math.floor(s / 3600) + " ó " + Math.floor((s % 3600) / 60) + " p";
+  return Math.floor(s / 86400) + " nap " + Math.floor((s % 86400) / 3600) + " ó";
+}
+function fmtNum(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + " M";
+  if (n >= 1e4) return (n / 1e3).toFixed(1) + " E";
+  return n.toLocaleString("hu-HU");
+}
+function esc(s) { const d = document.createElement("span"); d.textContent = s; return d.innerHTML; }
+
+function connect(token) {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/`);
+  ws.onopen = () => ws.send(JSON.stringify({ type: "admin", token }));
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === "admin_ok") {
+      authed = true;
+      sessionStorage.setItem("admintoken", token);
+      $("login").style.display = "none";
+      $("dash").style.display = "flex";
+      $("connBadge").textContent = "élő kapcsolat";
+      $("connBadge").className = "badge ok";
+      $("log").innerHTML = "";
+      m.events.forEach(addLog);
+    }
+    else if (m.type === "admin_state") renderState(m);
+    else if (m.type === "admin_event") addLog(m);
+  };
+  ws.onclose = ev => {
+    if (ev.code === 4003) {
+      sessionStorage.removeItem("admintoken");
+      $("loginErr").style.display = "block";
+      return;
+    }
+    if (!authed) return;
+    $("connBadge").textContent = "újracsatlakozás…";
+    $("connBadge").className = "badge";
+    setTimeout(() => connect(sessionStorage.getItem("admintoken")), 2500);
+  };
+}
+
+function cmd(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "admin_cmd", ...o })); }
+
+function renderState(s) {
+  $("devBadge").style.display = s.dev ? "inline-flex" : "none";
+  $("tUptime").textContent = fmtUptime(s.uptime);
+  $("tConns").textContent = fmtNum(s.active_conns);
+  $("tMsgs").textContent = fmtNum(s.total_msgs);
+  $("tRooms").textContent = fmtNum(s.rooms.length);
+
+  const box = $("rooms");
+  if (!s.rooms.length) { box.innerHTML = '<p class="empty">Most nincs aktív szoba.</p>'; }
+  else {
+    box.innerHTML = "";
+    for (const r of s.rooms) {
+      const div = document.createElement("div");
+      div.className = "room";
+      div.innerHTML =
+        `<div class="head"><b>#${esc(r.name)}</b>` +
+        `<span class="meta">${r.users.length} fő · ${r.history_len} üzenet a memóriában</span>` +
+        `<span class="actions"><button class="btn ghost sm" data-clear="${esc(r.name)}">Előzmény törlése</button></span></div>` +
+        `<table><tr><th>Becenév</th><th>IP-cím</th><th></th></tr>` +
+        r.users.map(u =>
+          `<tr><td>${esc(u.nick)}</td><td class="ip">${esc(u.ip)}</td>` +
+          `<td class="act"><button class="btn ghost sm" data-kick="${esc(u.nick)}" data-room="${esc(r.name)}">Kizárás</button> ` +
+          `<button class="btn danger sm" data-ban="${esc(u.ip)}">IP-tiltás</button></td></tr>`
+        ).join("") + `</table>`;
+      box.appendChild(div);
+    }
+  }
+
+  const bans = $("bans");
+  if (!s.bans.length) { bans.innerHTML = '<p class="empty">Nincs kitiltás.</p>'; }
+  else {
+    bans.innerHTML = "";
+    for (const ip of s.bans) {
+      const chip = document.createElement("span");
+      chip.className = "ban";
+      chip.innerHTML = `${esc(ip)} <button data-unban="${esc(ip)}" aria-label="Feloldás">` +
+        `<svg class="ic" viewBox="0 0 24 24" style="width:12px;height:12px"><use href="#i-x"/></svg></button>`;
+      bans.appendChild(chip);
+    }
+  }
+}
+
+function addLog(e) {
+  const div = document.createElement("div");
+  div.className = "entry" + (/SIKERTELEN|Flood|tiltva|Kizárás/i.test(e.text) ? " alert" : "");
+  div.innerHTML = `<span class="t">${esc(e.time)}</span><span>${esc(e.text)}</span>`;
+  const log = $("log");
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.kick && confirm(`Kizárod: ${b.dataset.kick}?`))
+    cmd({ cmd: "kick", nick: b.dataset.kick, room: b.dataset.room });
+  else if (b.dataset.ban && confirm(`Kitiltod az IP-t: ${b.dataset.ban}?`))
+    cmd({ cmd: "ban", ip: b.dataset.ban });
+  else if (b.dataset.unban) cmd({ cmd: "unban", ip: b.dataset.unban });
+  else if (b.dataset.clear && confirm(`Törlöd a(z) #${b.dataset.clear} szoba előzményeit?`))
+    cmd({ cmd: "clear", room: b.dataset.clear });
+});
+
+$("loginBtn").onclick = () => { $("loginErr").style.display = "none"; connect($("token").value.trim()); };
+$("token").addEventListener("keydown", e => { if (e.key === "Enter") $("loginBtn").click(); });
+$("announceBtn").onclick = () => {
+  const t = $("announce").value.trim();
+  if (t) { cmd({ cmd: "announce", text: t }); $("announce").value = ""; }
+};
+$("announce").addEventListener("keydown", e => { if (e.key === "Enter") $("announceBtn").click(); });
+$("logoutBtn").onclick = () => { sessionStorage.removeItem("admintoken"); location.reload(); };
+
+const saved = sessionStorage.getItem("admintoken");
+if (saved) connect(saved);
+</script>
+</body>
+</html>

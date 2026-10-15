@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+[[ -r /etc/park-ejszaka.conf ]] && source /etc/park-ejszaka.conf
+MAX_VARAS="${MAX_VARAS:-10800}"
+VARAS_LEPES="${VARAS_LEPES:-300}"
+TERHELES_HATAR="${TERHELES_HATAR:-2.5}"
+KIVAR_SZOLGALTATASOK="${KIVAR_SZOLGALTATASOK:-park-mentes park-nextcloud-cron apt-daily apt-daily-upgrade man-db logrotate dpkg-db-backup e2scrub_all fstrim csevego-cert}"
+KIVAR_FOLYAMATOK="${KIVAR_FOLYAMATOK:-apt apt-get dpkg restic rsync}"
+FIGYEL_VM="${FIGYEL_VM:-1}"
+FIGYEL_BELEPES="${FIGYEL_BELEPES:-1}"
+FIGYEL_SAMBA="${FIGYEL_SAMBA:-1}"
+
+ALLAPOT_FAJL="/run/park-ejszaka.allapot"
+KIHAGY_FAJL="/run/park-ejszaka.kihagy"
+
+naplo() { logger -t park-ejszaka "$*" 2>/dev/null; printf '%s\n' "$*"; }
+ertesit() { command -v park-ertesito >/dev/null 2>&1 && park-ertesito "$1" "$2" "${3:-info}" >/dev/null 2>&1 || true; }
+allapot_ir() { printf '%s\n' "$@" > "$ALLAPOT_FAJL.uj" && mv "$ALLAPOT_FAJL.uj" "$ALLAPOT_FAJL"; }
+
+okok() {
+    local sz p db
+    for sz in $KIVAR_SZOLGALTATASOK; do
+        systemctl is-active --quiet "$sz.service" 2>/dev/null && echo "fut: $sz"
+    done
+    for p in $KIVAR_FOLYAMATOK; do
+        pgrep -x "$p" >/dev/null 2>&1 && echo "folyamat: $p"
+    done
+    if [[ "$FIGYEL_VM" == 1 ]] && command -v virsh >/dev/null 2>&1; then
+        virsh -c qemu:///system list --state-running --name 2>/dev/null | sed '/^$/d; s/^/VM fut: /'
+    fi
+    if [[ "$FIGYEL_BELEPES" == 1 ]]; then
+        db="$(who 2>/dev/null | wc -l)"
+        (( db > 0 )) && echo "belépve: $db munkamenet ($(who | awk '{print $1}' | sort -u | paste -sd,))"
+    fi
+    if [[ "$FIGYEL_SAMBA" == 1 ]] && command -v smbstatus >/dev/null 2>&1; then
+        db="$(smbstatus -L 2>/dev/null | grep -cE '^[0-9]+ ')"
+        (( db > 0 )) && echo "Samba: $db nyitott fájl"
+    fi
+    systemd-inhibit --list --no-legend --no-pager 2>/dev/null | awk '/shutdown/ && /block/ {print "tiltás: " $1}'
+    awk -v h="$TERHELES_HATAR" '$1 > h {print "terhelés: " $1}' /proc/loadavg
+}
+
+json() {
+    python3 - "$ALLAPOT_FAJL" "$KIHAGY_FAJL" <<'PY'
+import json, os, sys
+a = {"allapot": "nincs", "okok": [], "kihagy": os.path.exists(sys.argv[2])}
+try:
+    sorok = open(sys.argv[1]).read().splitlines()
+    if sorok:
+        a["allapot"], a["okok"] = sorok[0], sorok[1:]
+except OSError:
+    pass
+print(json.dumps(a, ensure_ascii=False))
+PY
+}
+
+case "${1:-}" in
+    --okok)
+        o="$(okok)"; [[ -n "$o" ]] && printf '%s\n' "$o" || echo "nincs akadály – most leállhatna"
+        exit 0 ;;
+    --json) json; exit 0 ;;
+    --allapot)
+        json
+        [[ "$(systemctl show -p ActiveState --value park-ejszaka.service)" == activ* ]] && echo "A leállás folyamatban (vár)." || echo "Nincs folyamatban lévő leállás."
+        exit 0 ;;
+    --kihagy) touch "$KIHAGY_FAJL"; naplo "a ma éjszakai leállás kihagyva"; exit 0 ;;
+    --visszavon) rm -f "$KIHAGY_FAJL"; naplo "a kihagyás visszavonva"; exit 0 ;;
+    --megse)
+        systemctl stop park-ejszaka.service 2>/dev/null
+        systemctl reset-failed park-ejszaka.service 2>/dev/null
+        allapot_ir "megszakitva"
+        naplo "a leállás megszakítva"
+        exit 0 ;;
+    "") ;;
+    -h|--help|*)
+        cat <<'SUGO'
+park-ejszaka – kíméletes éjszakai leállás (a Feather indítja és ébreszti)
+
+  park-ejszaka              leállás: megvárja, amíg semmi fontos nem fut (a systemd indítja)
+  park-ejszaka --okok       mi tartaná most vissza a leállást
+  park-ejszaka --allapot    vár-e épp, és miért
+  park-ejszaka --megse      a várakozó leállás megszakítása
+  park-ejszaka --kihagy     a következő leállás kihagyása (újraindításig)
+  park-ejszaka --visszavon  a kihagyás visszavonása
+Beállítás: /etc/park-ejszaka.conf (MAX_VARAS, TERHELES_HATAR, KIVAR_SZOLGALTATASOK, FIGYEL_VM …)
+SUGO
+        [[ "${1:-}" == -h || "${1:-}" == --help ]] && exit 0 || exit 1 ;;
+esac
+
+if [[ -e "$KIHAGY_FAJL" ]]; then
+    rm -f "$KIHAGY_FAJL"
+    allapot_ir "kihagyva"
+    naplo "kihagyás kérve – most nem állok le"
+    exit 0
+fi
+
+kezdet=$SECONDS
+elozo=""
+while :; do
+    akadaly="$(okok)"
+    if [[ -z "$akadaly" ]]; then
+        break
+    fi
+    if [[ "$akadaly" != "$elozo" ]]; then
+        naplo "várok: $(paste -sd';' <<<"$akadaly")"
+        elozo="$akadaly"
+    fi
+    eltelt=$(( SECONDS - kezdet ))
+    { echo "var"; printf '%s\n' "$akadaly"; } > "$ALLAPOT_FAJL.uj" && mv "$ALLAPOT_FAJL.uj" "$ALLAPOT_FAJL"
+    if (( eltelt >= MAX_VARAS )); then
+        allapot_ir "feladva"
+        naplo "$(( MAX_VARAS / 60 )) perc várakozás után sem szabad – ma nem állok le"
+        ertesit "Éjszakai leállás elmaradt" "$(( MAX_VARAS / 60 )) percig vártam, de még mindig fut: $(paste -sd', ' <<<"$akadaly")" figy
+        exit 0
+    fi
+    sleep "$VARAS_LEPES"
+done
+
+allapot_ir "leall"
+varva=$(( (SECONDS - kezdet) / 60 ))
+naplo "nincs akadály$( (( varva > 0 )) && echo " ($varva perc várakozás után)") – leállok"
+ertesit "picloud leáll" "Éjszakai leállás$( (( varva > 0 )) && echo " $varva perc várakozás után")." info
+sync
+systemctl poweroff

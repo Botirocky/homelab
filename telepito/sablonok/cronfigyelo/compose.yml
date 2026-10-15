@@ -1,0 +1,32 @@
+services:
+  healthchecks:
+    image: healthchecks/healthchecks:latest
+    container_name: park-healthchecks
+    restart: unless-stopped
+    ports:
+      - "8107:8000"
+    volumes:
+      - ${ADAT_DIR}/healthchecks:/data
+    environment:
+      TZ: ${TZ}
+      DB: sqlite
+      DB_NAME: /data/hc.sqlite
+      SECRET_KEY: ${HC_SECRET}
+      SITE_ROOT: http://cron.${BELSO_DOMAIN}
+      SITE_NAME: Park cron-figyelő
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      PYTHONUTF8: "1"
+      ALLOWED_HOSTS: "*"
+      REGISTRATION_OPEN: "False"
+      DEBUG: "False"
+      APPRISE_ENABLED: "False"
+      NTFY_ENABLED: "True"
+    mem_limit: 384m
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

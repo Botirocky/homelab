@@ -1,0 +1,5 @@
+#pragma once
+#define WIFI_SSID "SAJAT-WIFI"
+#define WIFI_JELSZO "wifi-jelszo"
+#define WEB_KULCS "hosszu-veletlen-kulcs"
+#define GEPEK_KULCS "hosszu-veletlen-kulcs"

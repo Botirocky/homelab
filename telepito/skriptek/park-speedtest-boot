@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+[[ -r /etc/szerverpark.conf ]] && source /etc/szerverpark.conf
+KONTENER="${SPEEDTEST_KONTENER:-park-speedtest}"
+ORA="${SPEEDTEST_BOOT_ORA:-3}"
+
+naplo() { echo "$*"; logger -t park-speedtest-boot "$*" 2>/dev/null; }
+
+if ! docker inspect -f '{{.State.Running}}' "$KONTENER" 2>/dev/null | grep -q true; then
+    naplo "a ${KONTENER} konténer nem fut – kihagyom"
+    exit 0
+fi
+
+for _ in $(seq 1 60); do
+    docker exec "$KONTENER" test -f /app/www/bootstrap/cache/config.php 2>/dev/null && break
+    sleep 5
+done
+
+kimenet="$(docker exec -u abc -e ORA="$ORA" "$KONTENER" php -r '
+require "/app/www/vendor/autoload.php";
+$app = require "/app/www/bootstrap/app.php";
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$ora = max(1, (int) getenv("ORA"));
+$utolso = App\Models\Result::orderByDesc("id")->first();
+if ($utolso && Illuminate\Support\Carbon::parse($utolso->created_at)->gt(now()->subHours($ora))) {
+    echo "friss mérés van (", $utolso->created_at, " UTC) – kihagyom";
+    exit(0);
+}
+$r = App\Actions\Ookla\RunSpeedtest::run(true);
+echo "mérés elindítva (#", $r->id, "), az utolsó ", $ora, " óránál régebbi volt";
+' 2>&1)"
+kod=$?
+naplo "$kimenet"
+exit "$kod"

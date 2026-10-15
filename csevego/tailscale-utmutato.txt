@@ -1,0 +1,69 @@
+Persze! Átnéztem a `server.py`-t és a README-t, úgyhogy konkrétan erre az appra szabva írom le. A lényeg: a Tailscale egy privát WireGuard-hálózatba köti a gépeidet és a barátaid eszközeit, így a chat **nem kerül ki a nyílt internetre**, mégis bárhonnan elérhető — ráadásul fix címen (nem úgy, mint a Cloudflare tunnel, ahol minden indításkor új URL van).
+
+## 1. Tailscale a szerver gépen (CachyOS)
+
+```bash
+sudo pacman -S tailscale
+sudo systemctl enable --now tailscaled
+sudo tailscale up
+```
+
+A `tailscale up` kiír egy linket — böngészőben jelentkezz be (Google/GitHub/Apple fiókkal). Utána kérdezd le a géped Tailscale-címét:
+
+```bash
+tailscale ip -4     # pl. 100.101.102.103
+```
+
+## 2. Tailscale a többiek eszközén
+
+- **Android/iPhone:** Tailscale app a Play Store / App Store-ból
+- **Windows/Mac/Linux:** tailscale.com/download
+
+Két mód, hogy ők is lássák a gépedet:
+- **Közös tailnet:** az ingyenes csomagban 3 felhasználót hívhatsz meg (admin konzol → *Users* → *Invite*), mindenki a saját fiókjával lép be.
+- **Gépmegosztás (node sharing):** az admin konzolban (login.tailscale.com) a gépednél *Share* — így a barátod a **saját** tailnetjéből éri el csak a te gépedet, mást nem lát a hálózatodból. Ez a jobb választás ismerősöknek.
+
+## 3. Csatlakozás a chathez
+
+Indítsd a szervert, ahogy eddig (`python3 server.py`), és a többiek ezt nyitják meg:
+
+```
+http://100.101.102.103:8765
+```
+
+Ennyi — nincs port forwarding, nincs router-beállítás, és kívülálló egyáltalán nem fér hozzá (az admin felület is csak a tailneten belülről látszik).
+
+## 4. HTTPS — hogy az E2EE is működjön ⚠️
+
+Ez a fontos rész: a böngészők a WebCrypto API-t (amire a szobajelszavas E2EE-d épül) csak **biztonságos kapcsolaton** engedik, a sima `http://100.x.y.z:8765` pedig nem az. Két jó megoldás:
+
+**A) `tailscale cert` — valódi, megbízható tanúsítvány (ezt ajánlom)**
+
+Az admin konzolban kapcsold be a **MagicDNS**-t és a **HTTPS Certificates**-t (*DNS* fül), majd a szerver gépen:
+
+```bash
+cd ~/Dokumentumok/projectek/chat
+sudo tailscale cert --cert-file cert.pem --key-file key.pem gepneved.tailnet-neved.ts.net
+sudo chown "$USER:$USER" cert.pem key.pem
+```
+
+A `server.py` automatikusan felismeri a `cert.pem` + `key.pem` fájlokat és HTTPS-re vált — újraindítás után a cím:
+
+```
+https://gepneved.tailnet-neved.ts.net:8765
+```
+
+Ez valódi Let's Encrypt tanúsítvány, **nincs böngésző-figyelmeztetés**, az E2EE megy, és PWA-ként is szépen telepíthető erről a címről. (A tanúsítvány ~90 napig érvényes, utána ugyanazzal a paranccsal megújítható.)
+
+**B) A meglévő `make_cert.sh` (önaláírt)**
+
+Ez is működik Tailscale-en (a szkript a globális IP-ket beleveszi a tanúsítványba, a 100.x.y.z címet is), de mindenki böngészője figyelmeztetni fog először, és a „Tovább" gombot kell nyomni. Gyorsabb, de csúnyább élmény, mint az A) opció.
+
+## Összegzés
+
+| | Cloudflare Tunnel | Tailscale |
+|---|---|---|
+| Kinek | bárkinek küldhető link | zárt kör (meghívott eszközök) |
+| Cím | minden indításkor más | állandó |
+| HTTPS | automatikus | `tailscale cert`-tel |
+| Kitettség | publikus URL | semmi nem látszik kifelé |

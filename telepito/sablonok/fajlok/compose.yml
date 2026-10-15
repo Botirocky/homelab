@@ -1,0 +1,70 @@
+# Fájltárolás: Nextcloud (saját felhő, telefonos apppal) + FileBrowser
+# (gyors webes fájlkezelő ugyanarra a lemezre, ahol a Samba-megosztás is van).
+services:
+  nextcloud-db:
+    image: mariadb:11
+    container_name: park-nextcloud-db
+    restart: unless-stopped
+    command: --transaction-isolation=READ-COMMITTED --log-bin=binlog --binlog-format=ROW --innodb-buffer-pool-size=256M --innodb-log-file-size=128M --slow-query-log=ON --long-query-time=2
+    volumes:
+      - ${ADAT_DIR}/nextcloud/db:/var/lib/mysql
+    environment:
+      TZ: ${TZ}
+      MARIADB_ROOT_PASSWORD: ${NC_DB_ROOT_JELSZO}
+      MARIADB_DATABASE: nextcloud
+      MARIADB_USER: nextcloud
+      MARIADB_PASSWORD: ${NC_DB_JELSZO}
+    networks: [park]
+
+  nextcloud-redis:
+    image: redis:7-alpine
+    container_name: park-nextcloud-redis
+    restart: unless-stopped
+    networks: [park]
+
+  nextcloud:
+    image: nextcloud:apache
+    container_name: park-nextcloud
+    restart: unless-stopped
+    depends_on: [nextcloud-db, nextcloud-redis]
+    ports:
+      - "8081:80"
+    volumes:
+      - ${ADAT_DIR}/nextcloud/app:/var/www/html
+      - ${NC_FAJL_DIR}:/var/www/html/data
+    environment:
+      TZ: ${TZ}
+      MYSQL_HOST: nextcloud-db
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: ${NC_DB_JELSZO}
+      REDIS_HOST: nextcloud-redis
+      NEXTCLOUD_ADMIN_USER: ${NC_ADMIN_FELHASZNALO}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NC_ADMIN_JELSZO}
+      # A saját IP is kell: amíg a belső DNS nincs beállítva, a gépet
+      # http://<IP>:8081 címen éred el, és a Nextcloud csak ismert nevet fogad el.
+      NEXTCLOUD_TRUSTED_DOMAINS: "felho.${BELSO_DOMAIN} localhost ${NC_PUBLIKUS_DOMAIN} ${NC_EXTRA_DOMAIN:-}"
+      # Belső hálózaton http megy; https csak akkor, ha van publikus domain.
+      OVERWRITEPROTOCOL: ${NC_PROTOKOLL:-http}
+      PHP_MEMORY_LIMIT: 1G
+      PHP_UPLOAD_LIMIT: 16G
+    networks: [park]
+
+  filebrowser:
+    image: filebrowser/filebrowser:s6
+    container_name: park-filebrowser
+    restart: unless-stopped
+    ports:
+      - "8082:80"
+    volumes:
+      - ${ADAT_DIR}/megosztas:/srv
+      - ${ADAT_DIR}/filebrowser:/database
+    environment:
+      TZ: ${TZ}
+      PUID: ${PUID}
+      PGID: ${PGID}
+    networks: [park]
+
+networks:
+  park:
+    external: true

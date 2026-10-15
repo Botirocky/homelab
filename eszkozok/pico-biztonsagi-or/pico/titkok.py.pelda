@@ -1,0 +1,5 @@
+WIFI_SSID = "SAJAT-WIFI"
+WIFI_JELSZO = "wifi-jelszo"
+KULCS = "hosszu-veletlen-kulcs"
+PORT = 8080
+NEV = "or"

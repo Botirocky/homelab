@@ -1,0 +1,11 @@
+__pycache__/
+graphify-out/
+managed_context/
+test_suite_analysis/
+.env
+*.pem
+.admin_token
+chat_data/
+github-upload/
+*.iso
+*.iso.sha256

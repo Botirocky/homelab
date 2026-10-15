@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+[[ -r /etc/park-leallas.conf ]] && source /etc/park-leallas.conf
+ALLAPOT_DIR="${ALLAPOT_DIR:-/var/lib/park-leallas}"
+KONTENER_VARAS="${KONTENER_VARAS:-60}"
+VM_VARAS="${VM_VARAS:-120}"
+ALAP_KONTENEREK="${ALAP_KONTENEREK:-(-db|-redis|-mosquitto|-caddy)$|^pihole$}"
+DUGALJ_KI="${DUGALJ_KI:-1}"
+DUGALJ_TARTALEK="${DUGALJ_TARTALEK:-180}"
+DUGALJ_KESLELTETES="${DUGALJ_KESLELTETES:-15}"
+DUGALJ_ENV="${DUGALJ_ENV:-/etc/park-dugalj.env}"
+DUGALJ_PYTHON="${DUGALJ_PYTHON:-/opt/park-kasa/bin/python}"
+DUGALJ_SEGED="${DUGALJ_SEGED:-/usr/local/lib/park/park-dugalj-idozito.py}"
+NAGYGEP="${NAGYGEP:-1}"
+NAGYGEP_CIMEK="${NAGYGEP_CIMEK:-100.64.0.2 10.42.0.159}"
+NAGYGEP_MAC="${NAGYGEP_MAC:-aa:bb:cc:00:00:01}"
+NAGYGEP_KULCS="${NAGYGEP_KULCS:-/etc/park-leallas/nagygep_ed25519}"
+
+KONTENER_LISTA="$ALLAPOT_DIR/kontenerek"
+VM_LISTA="$ALLAPOT_DIR/vmek"
+DUGALJ_JEL="$ALLAPOT_DIR/dugalj-ki"
+OSSZEGZES="$ALLAPOT_DIR/utolso-leallas"
+NAGYGEP_JEL="$ALLAPOT_DIR/nagygep-leallitva"
+
+naplo() { logger -t park-leallas "$*" 2>/dev/null; [[ -t 1 ]] && printf '%s\n' "$*"; return 0; }
+
+leallas_tipusa() {
+    local jobok
+    jobok="$(systemctl list-jobs --no-legend --no-pager 2>/dev/null | awk '{print $2}')"
+    if grep -qE '^(poweroff|halt)\.target$' <<<"$jobok"; then
+        echo ki
+    elif grep -qE '^(reboot|kexec|soft-reboot)\.target$' <<<"$jobok"; then
+        echo ujra
+    else
+        echo nincs
+    fi
+}
+
+ejszakai_leallas() {
+    [[ "$(head -n1 /run/park-ejszaka.allapot 2>/dev/null)" == "leall" ]]
+}
+
+dugalj() {
+    [[ -r "$DUGALJ_ENV" && -x "$DUGALJ_PYTHON" && -r "$DUGALJ_SEGED" ]] || { echo "a dugalj-vezérlés nincs telepítve ($DUGALJ_ENV, $DUGALJ_PYTHON)" >&2; return 1; }
+    (
+        set -a
+        source "$DUGALJ_ENV"
+        set +a
+        "$DUGALJ_PYTHON" -I -B "$DUGALJ_SEGED" "$@" 2>&1 | grep -v -E 'Unclosed|client_session|connector|connections:'
+        exit "${PIPESTATUS[0]}"
+    )
+}
+
+nagygep_parancs() {
+    local cim
+    [[ -r "$NAGYGEP_KULCS" ]] || { echo "nincs-kulcs"; return 1; }
+    for cim in $NAGYGEP_CIMEK; do
+        ssh -i "$NAGYGEP_KULCS" -o BatchMode=yes -o ConnectTimeout=5 \
+            -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/park-leallas/known_hosts \
+            "root@$cim" "$1" 2>/dev/null && return 0
+    done
+    echo "nem-erheto-el"
+    return 1
+}
+
+nagygep_leallit() {
+    [[ "$NAGYGEP" == 1 ]] || return 0
+    local valasz
+    valasz="$(nagygep_parancs leallit)"
+    case "$valasz" in
+        leall*)
+            touch "$NAGYGEP_JEL"
+            naplo "nagygép: leáll (induláskor WoL-lal ébresztem)" ;;
+        nincs-kabel*)
+            rm -f "$NAGYGEP_JEL"
+            naplo "nagygép: nincs bedugva a kábel (még nincs switch) – nem állítom le" ;;
+        *)
+            rm -f "$NAGYGEP_JEL"
+            naplo "nagygép: nem érhető el ($valasz) – kihagyom" ;;
+    esac
+}
+
+nagygep_ebreszt() {
+    python3 - "$NAGYGEP_MAC" <<'PY'
+import socket, sys, time
+mac = bytes.fromhex(sys.argv[1].replace(":", "").replace("-", ""))
+csomag = b"\xff" * 6 + mac * 16
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+for _ in range(3):
+    for cel in ("255.255.255.255", "192.168.1.255"):
+        for port in (9, 7):
+            try:
+                s.sendto(csomag, (cel, port))
+            except OSError:
+                pass
+    time.sleep(1)
+PY
+}
+
+kontenerek_ment() {
+    command -v docker >/dev/null 2>&1 || return 0
+    local futok alap tobbi
+    futok="$(docker ps --format '{{.Names}}' 2>/dev/null | sort)"
+    [[ -n "$futok" ]] || { rm -f "$KONTENER_LISTA"; return 0; }
+    alap="$(grep -E "$ALAP_KONTENEREK" <<<"$futok" || true)"
+    tobbi="$(grep -vE "$ALAP_KONTENEREK" <<<"$futok" || true)"
+    printf '%s\n' $alap $tobbi > "$KONTENER_LISTA.uj" && mv "$KONTENER_LISTA.uj" "$KONTENER_LISTA"
+    naplo "konténerek leállítása: $(wc -l < "$KONTENER_LISTA") db (max $KONTENER_VARAS mp)"
+    [[ -n "$tobbi" ]] && docker stop -t "$KONTENER_VARAS" $tobbi >/dev/null 2>&1
+    [[ -n "$alap" ]] && docker stop -t "$KONTENER_VARAS" $alap >/dev/null 2>&1
+    naplo "konténerek leállítva"
+}
+
+vmek_ment() {
+    command -v virsh >/dev/null 2>&1 || return 0
+    local futok vm
+    futok="$(virsh -c qemu:///system list --state-running --name 2>/dev/null | sed '/^$/d')"
+    [[ -n "$futok" ]] || { rm -f "$VM_LISTA"; return 0; }
+    printf '%s\n' "$futok" > "$VM_LISTA"
+    for vm in $futok; do
+        if timeout "$VM_VARAS" virsh -c qemu:///system managedsave "$vm" >/dev/null 2>&1; then
+            naplo "VM elmentve (memóriával együtt): $vm"
+        else
+            naplo "VM mentése nem sikerült, leállítom: $vm"
+            virsh -c qemu:///system shutdown "$vm" >/dev/null 2>&1
+            timeout 60 bash -c "while virsh -c qemu:///system domstate '$vm' 2>/dev/null | grep -q running; do sleep 2; done"
+            virsh -c qemu:///system destroy "$vm" >/dev/null 2>&1
+        fi
+    done
+}
+
+ment() {
+    local tipus
+    tipus="$(leallas_tipusa)"
+    if [[ "$tipus" == "nincs" ]]; then
+        naplo "nem leállás közben állítottak le – nem nyúlok a konténerekhez és VM-ekhez"
+        return 0
+    fi
+    mkdir -p "$ALLAPOT_DIR"
+    rm -f "$DUGALJ_JEL"
+    naplo "leállás ($tipus) – a munkafolyamat mentése"
+    if [[ "$tipus" == "ki" ]]; then
+        nagygep_leallit
+    else
+        rm -f "$NAGYGEP_JEL"
+    fi
+    vmek_ment
+    kontenerek_ment
+    sync
+    {
+        echo "ido=$(date '+%F %T')"
+        echo "tipus=$tipus"
+        echo "kontenerek=$(paste -sd' ' "$KONTENER_LISTA" 2>/dev/null)"
+        echo "vmek=$(paste -sd' ' "$VM_LISTA" 2>/dev/null)"
+    } > "$OSSZEGZES"
+
+    if [[ "$tipus" != "ki" ]]; then
+        return 0
+    elif [[ "$DUGALJ_KI" != 1 ]]; then
+        naplo "a dugalj lekapcsolása ki van kapcsolva (DUGALJ_KI=0)"
+    elif ejszakai_leallas; then
+        naplo "éjszakai leállás – a dugalj BE marad (az ESP32 GPIO3-on ébreszt)"
+    elif dugalj be "$DUGALJ_TARTALEK"; then
+        touch "$DUGALJ_JEL"
+        sync
+        naplo "dugalj: tartalék-időzítő $DUGALJ_TARTALEK mp; a leállás legvégén $DUGALJ_KESLELTETES mp-re rövidül"
+    else
+        naplo "a dugalj nem érhető el – a Pi leáll, de az áram bekapcsolva marad"
+    fi
+}
+
+visszaallit() {
+    local nev vm
+    rm -f "$DUGALJ_JEL"
+    if [[ -e "$NAGYGEP_JEL" ]]; then
+        nagygep_ebreszt && naplo "nagygép: WoL elküldve ($NAGYGEP_MAC)"
+        rm -f "$NAGYGEP_JEL"
+    fi
+    if [[ -s "$VM_LISTA" ]] && command -v virsh >/dev/null 2>&1; then
+        while read -r vm; do
+            [[ -n "$vm" ]] || continue
+            virsh -c qemu:///system start "$vm" >/dev/null 2>&1 \
+                && naplo "VM visszaállítva: $vm" || naplo "VM nem indult: $vm"
+        done < "$VM_LISTA"
+    fi
+    rm -f "$VM_LISTA"
+    if [[ -s "$KONTENER_LISTA" ]] && command -v docker >/dev/null 2>&1; then
+        local inditott=0 hibas=""
+        while read -r nev; do
+            [[ -n "$nev" ]] || continue
+            [[ "$(docker inspect -f '{{.State.Running}}' "$nev" 2>/dev/null)" == "true" ]] && continue
+            if docker start "$nev" >/dev/null 2>&1; then
+                inditott=$((inditott + 1))
+            else
+                hibas+=" $nev"
+            fi
+        done < "$KONTENER_LISTA"
+        naplo "konténerek visszaállítva: $inditott db${hibas:+; nem indult:$hibas}"
+    fi
+    rm -f "$KONTENER_LISTA"
+}
+
+horog() {
+    [[ "${1:-}" == "poweroff" || "${1:-}" == "halt" ]] || return 0
+    [[ -e "$DUGALJ_JEL" ]] || return 0
+    if TAPO_TIMEOUT=4 TAPO_KISERLET=2 dugalj be "$DUGALJ_KESLELTETES" >/dev/null 2>&1; then
+        echo "park-leallas: a dugalj $DUGALJ_KESLELTETES mp múlva kikapcsol" > /dev/kmsg 2>/dev/null
+    else
+        echo "park-leallas: a dugalj nem érhető el – a tartalék-időzítő kapcsolja le" > /dev/kmsg 2>/dev/null
+    fi
+    return 0
+}
+
+allapot() {
+    systemctl is-active --quiet park-leallas.service && echo "park-leallas.service: aktív (leálláskor ment)" || echo "park-leallas.service: NEM aktív"
+    [[ -r "$OSSZEGZES" ]] && { echo "utolsó leállás:"; sed 's/^/  /' "$OSSZEGZES"; } || echo "még nem volt mentett leállás"
+    printf 'dugalj-időzítő: '; dugalj allapot || true
+    printf 'nagygép: '; nagygep_parancs allapot || true
+}
+
+case "${1:-allapot}" in
+    ment)        ment ;;
+    visszaallit) visszaallit ;;
+    horog)       horog "${2:-}" ;;
+    dugalj)      shift; dugalj "$@" ;;
+    nagygep)
+        case "${2:-allapot}" in
+            allapot)  nagygep_parancs allapot ;;
+            ebreszt)  nagygep_ebreszt && echo "WoL elküldve: $NAGYGEP_MAC" ;;
+            leallit)  nagygep_parancs leallit ;;
+            *)        echo "park-leallas nagygep [allapot|ebreszt|leallit]" >&2; exit 2 ;;
+        esac ;;
+    allapot)     allapot ;;
+    *)
+        cat <<'SUGO'
+park-leallas – leálláskor menti a futó konténereket és VM-eket, indításkor visszaállítja;
+                kikapcsoláskor (nem újraindításkor) a Tapo-dugaljat is lekapcsolja.
+  park-leallas                 állapot (utolsó leállás, dugalj-időzítő)
+  park-leallas dugalj allapot  a dugalj időzítője
+  park-leallas dugalj torol    időzítő törlése
+  park-leallas nagygep [allapot|ebreszt|leallit]
+                               a nagygép: kikapcsoláskor leáll, induláskor WoL-lal ébred
+                               (csak ha a nagygép kábelen van – amíg nincs switch, kimarad)
+Leállítás: sudo shutdown / sudo poweroff  (újraindításnál a dugalj marad)
+SUGO
+        ;;
+esac

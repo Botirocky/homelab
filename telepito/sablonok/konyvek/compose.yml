@@ -1,0 +1,37 @@
+services:
+  kavita:
+    image: jvmilazz0/kavita:latest
+    container_name: park-kavita
+    restart: unless-stopped
+    ports:
+      - "8091:5000"
+    volumes:
+      - ${ADAT_DIR}/kavita:/kavita/config
+      - ${KONYV_DIR}/konyvek:/konyvek
+      - ${KONYV_DIR}/kepregenyek:/kepregenyek
+    environment:
+      TZ: ${TZ}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+  audiobookshelf:
+    image: ghcr.io/advplyr/audiobookshelf:latest
+    container_name: park-audiobookshelf
+    restart: unless-stopped
+    ports:
+      - "13378:80"
+    volumes:
+      - ${ADAT_DIR}/audiobookshelf/config:/config
+      - ${ADAT_DIR}/audiobookshelf/metadata:/metadata
+      - ${KONYV_DIR}/hangoskonyvek:/audiobooks
+      - ${KONYV_DIR}/podcastok:/podcasts
+    environment:
+      TZ: ${TZ}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+import html
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+from http.cookiejar import CookieJar
+from pathlib import Path
+
+CIM = os.environ.get("ORAREND_CIM", "https://picloud.pelda-tailnet.ts.net:8444").rstrip("/")
+PROFIL = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "kreta-belepes/firefox"
+VARAKOZAS = 600
+BEALLITASOK = """user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+user_pref("trailhead.firstrun.didSeeAboutWelcome", true);
+"""
+
+
+def hiba(szoveg):
+    print(f"\033[31mHiba:\033[0m {szoveg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def orarend_jelszo():
+    if os.environ.get("ORAREND_JELSZO"):
+        return os.environ["ORAREND_JELSZO"]
+    try:
+        r = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "picloud",
+             "sudo sed -n 's/^ORAREND_JELSZO=//p' /srv/szerverpark/.env"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        hiba(f"nem értem el a picloudot SSH-n ({e}); add meg: ORAREND_JELSZO=… kreta-belepes")
+    jelszo = r.stdout.strip().strip('"').strip("'")
+    if not jelszo:
+        hiba("nem találom az ORAREND_JELSZO-t a picloudon; add meg: ORAREND_JELSZO=… kreta-belepes")
+    return jelszo
+
+
+def kod_az_elozmenyekbol(kezdet):
+    with tempfile.TemporaryDirectory() as t:
+        for f in ("places.sqlite", "places.sqlite-wal"):
+            if (PROFIL / f).exists():
+                shutil.copy(PROFIL / f, t)
+        if not os.path.exists(os.path.join(t, "places.sqlite")):
+            return None
+        try:
+            db = sqlite3.connect(os.path.join(t, "places.sqlite"))
+            sor = db.execute(
+                "select url from moz_places where url like 'https://mobil.e-kreta.hu/%code=%' "
+                "and last_visit_date >= ? order by last_visit_date desc limit 1",
+                (int(kezdet * 1_000_000),),
+            ).fetchone()
+            db.close()
+        except sqlite3.Error:
+            return None
+    return sor[0] if sor else None
+
+
+def main():
+    if not shutil.which("firefox"):
+        hiba("nincs telepítve Firefox")
+    nyito = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+
+    def kuld(ut, adat=None):
+        torzs = urllib.parse.urlencode(adat).encode() if adat is not None else None
+        try:
+            v = nyito.open(urllib.request.Request(CIM + ut, data=torzs), timeout=60)
+        except OSError as e:
+            hiba(f"az órarend-szerver nem válaszol ({CIM}): {e}")
+        return v.geturl(), v.read().decode("utf-8", "replace")
+
+    print("Belépés az órarend-szerverre…")
+    hova, _ = kuld("/bejelentkezes", {"jelszo": orarend_jelszo()})
+    if urllib.parse.urlsplit(hova).path == "/bejelentkezes":
+        hiba("az órarend-szerver nem fogadta el a jelszót")
+    _, torzs = kuld("/api/kezi-link")
+    try:
+        link = json.loads(torzs)["link"]
+    except (ValueError, KeyError):
+        hiba("a szerver nem adott belépési linket – frissítve van az órarend?")
+
+    PROFIL.mkdir(parents=True, exist_ok=True)
+    (PROFIL / "user.js").write_text(BEALLITASOK)
+    print("Megnyílik egy Firefox-ablak a Kréta belépő oldalával. Lépj be (2FA-val együtt);")
+    print("ha a végén hibaoldalra ugrik, az rendben van – az ablak magától bezárul.")
+    kezdet = time.time() - 2
+    ff = subprocess.Popen(
+        ["firefox", "--new-instance", "--no-remote", "--profile", str(PROFIL), link],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    url = None
+    try:
+        while time.time() - kezdet < VARAKOZAS:
+            url = kod_az_elozmenyekbol(kezdet)
+            if url or ff.poll() is not None:
+                break
+            time.sleep(1.5)
+        if not url:
+            url = kod_az_elozmenyekbol(kezdet)
+    finally:
+        if ff.poll() is None:
+            ff.terminate()
+            try:
+                ff.wait(10)
+            except subprocess.TimeoutExpired:
+                ff.kill()
+
+    if not url:
+        hiba("nem jött belépési kód (bezártad az ablakot, vagy lejárt a 10 perc)")
+    print("Megvan a kód, beváltás a szerveren…")
+    hova, torzs = kuld("/kezi", {"link": url})
+    if urllib.parse.urlsplit(hova).path == "/kezi":
+        m = re.search(r'class="hiba"[^>]*>(.*?)</div>', torzs, re.S)
+        hiba(html.unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip() if m else "a szerver nem fogadta el a kódot")
+    print("\033[32mKész!\033[0m A szerver belépett, és letölti az órarendet:", CIM)
+
+
+if __name__ == "__main__":
+    main()

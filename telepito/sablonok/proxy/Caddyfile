@@ -1,0 +1,10 @@
+# Szerverpark – fő Caddy konfiguráció.
+# Az egyes oldalak/szolgáltatások a sites.d mappában, külön fájlokban vannak;
+# új oldalt a  park oldal <domain>  paranccsal a legegyszerűbb felvenni.
+
+{
+	email {$EMAIL:admin@park.lan}
+	admin :2019
+}
+
+import /etc/caddy/sites.d/*.caddy

@@ -1,0 +1,32 @@
+services:
+  stirling-pdf:
+    image: stirlingtools/stirling-pdf:latest
+    container_name: park-stirling-pdf
+    restart: unless-stopped
+    ports:
+      - "8094:8080"
+    volumes:
+      - ${ADAT_DIR}/stirling-pdf/configs:/configs
+      - ${ADAT_DIR}/stirling-pdf/tessdata:/usr/share/tessdata
+    environment:
+      TZ: ${TZ}
+      LANGS: hu_HU
+      SECURITY_ENABLELOGIN: "false"
+      SYSTEM_DEFAULTLOCALE: hu-HU
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+  it-tools:
+    image: corentinth/it-tools:latest
+    container_name: park-it-tools
+    restart: unless-stopped
+    ports:
+      - "8095:80"
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

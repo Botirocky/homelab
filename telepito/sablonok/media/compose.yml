@@ -1,0 +1,46 @@
+# Média: filmek/sorozatok (Jellyfin) és zene (Navidrome).
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: park-jellyfin
+    restart: unless-stopped
+    ports:
+      - "8096:8096"
+    volumes:
+      - ${ADAT_DIR}/jellyfin/config:/config
+      - ${ADAT_DIR}/jellyfin/cache:/cache
+      - ${MEDIA_DIR:-${ADAT_DIR}/media}:/media
+    environment:
+      TZ: ${TZ}
+      JELLYFIN_PublishedServerUrl: http://media.${BELSO_DOMAIN}
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-104}"
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: park-navidrome
+    restart: unless-stopped
+    ports:
+      - "4533:4533"
+    volumes:
+      - ${ADAT_DIR}/navidrome:/data
+      - ${MEDIA_DIR:-${ADAT_DIR}/media}/zene:/music:ro
+    environment:
+      TZ: ${TZ}
+      ND_SCANSCHEDULE: "1h"
+      ND_LOGLEVEL: info
+      ND_BASEURL: ""
+    user: "${PUID:-1000}:${PGID:-1000}"
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

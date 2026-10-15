@@ -1,0 +1,15 @@
+[Unit]
+Description=park: leálláskor menti a konténereket és VM-eket, indításkor visszaállítja
+Wants=network-online.target
+After=network-online.target docker.service libvirtd.service libvirt-guests.service tailscaled.service NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/park-leallas visszaallit
+ExecStop=/usr/local/bin/park-leallas ment
+TimeoutStartSec=600
+TimeoutStopSec=600
+
+[Install]
+WantedBy=multi-user.target

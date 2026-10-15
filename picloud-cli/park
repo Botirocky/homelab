@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+declare -A GEP=([pi]="${PARK_PI:-picloud}" [nagy]="${PARK_NAGY:-nagy}")
+SORREND=(pi nagy)
+ITT="$(dirname "$(readlink -f "$0")")"
+
+sugo() {
+    cat <<'S'
+park – a két szerver egy helyről
+
+  park                     mindkét gép állapota (picloud --all)
+  park figyel [mp]         ugyanez, folyamatosan frissítve (alap: 5 mp)
+  park pi                  belépés a Pi-re (ssh)
+  park nagy                belépés a nagy gépre (ssh)
+  park pi <parancs…>       a Pi szerverpark-parancsa (sudo park <parancs…>)
+  park nagy <parancs…>     ugyanez a nagy gépen
+  park mind <parancs…>     mindkét gépen egymás után
+  park pi -- <shell…>      tetszőleges shell-parancs a Pi-n (pl. park pi -- df -h)
+
+  park dugalj              a Pi Tapo-dugaljának állapota
+  park dugalj be           áram rá
+  park dugalj ki           a Pi rendes leállítása, utána áram le
+  park dugalj ujraindit    kemény újraindítás (lefagyott Pi-hez): áram le, 10 mp, áram fel
+  park dugalj or [be|ki]   automatikus újraindító őr: állapot / bekapcsolás / szünet
+  park dugalj or naplo     az őr naplója
+
+  példák:  park mind allapot · park nagy naplo hirek · park pi mentes
+S
+}
+
+tavoli() {
+    local gep="$1"; shift
+    local host="${GEP[$gep]}"
+    if [[ $# -eq 0 ]]; then
+        exec ssh "$host"
+    fi
+    local parancs
+    if [[ "$1" == "--" ]]; then
+        shift
+        parancs="$(printf '%q ' "$@")"
+    else
+        parancs="sudo park $(printf '%q ' "$@")"
+    fi
+    if [[ -t 1 ]]; then
+        ssh -t -o ConnectTimeout=8 "$host" "$parancs"
+    else
+        ssh -o ConnectTimeout=8 "$host" "$parancs"
+    fi
+}
+
+DUGALJ_ENV="${PARK_DUGALJ_ENV:-$HOME/.config/park/tapo.env}"
+
+kasa_hiv() {
+    kasa --host "$TAPO_HOST" "$@" 2>&1 | { grep -v -E 'Unclosed|client_session|connector|connections:' || true; }
+}
+
+pi_el() {
+    ping -c1 -W2 "${PARK_PI_IP:-192.168.1.185}" >/dev/null 2>&1
+}
+
+igen_e() {
+    [[ -t 0 ]] || return 0
+    local v
+    read -rp "$1 [i/N] " v
+    [[ "$v" == [iIyY]* ]]
+}
+
+OR_ALL="${XDG_STATE_HOME:-$HOME/.local/state}/park"
+
+dugalj_or() {
+    case "${1:-allapot}" in
+        allapot)
+            systemctl --user is-active -q park-dugalj-or.timer && echo "Időzítő: fut (percenként)" || echo "Időzítő: NEM fut"
+            [[ -e "$OR_ALL/dugalj-or.szunet" ]] && echo "Őr: SZÜNETEL (park dugalj or be)" || echo "Őr: éles"
+            if [[ -r "$OR_ALL/dugalj-or.hiba-ota" ]]; then
+                read -r ota tipus <"$OR_ALL/dugalj-or.hiba-ota"
+                echo "Hiba észlelve $(( ($(date +%s) - ota) / 60 )) perce ($tipus)"
+            fi
+            local n
+            n=$(awk -v h=$(( $(date +%s) - 86400 )) '$1 > h' "$OR_ALL/dugalj-or.ujrainditasok" 2>/dev/null | wc -l)
+            echo "Újraindítás az elmúlt 24 órában: $n"
+            [[ -s "$OR_ALL/dugalj-or.ujrainditasok" ]] && echo "Utolsó: $(date -d "@$(tail -n1 "$OR_ALL/dugalj-or.ujrainditasok")" '+%Y-%m-%d %H:%M')" ;;
+        be)
+            rm -f "$OR_ALL/dugalj-or.szunet"
+            systemctl --user enable --now park-dugalj-or.timer && echo "Az őr él." ;;
+        ki|szunet)
+            mkdir -p "$OR_ALL" && touch "$OR_ALL/dugalj-or.szunet" && echo "Az őr szünetel." ;;
+        naplo)
+            journalctl --user -t park-dugalj-or -n "${2:-30}" --no-pager ;;
+        *)
+            echo "park dugalj or [allapot|be|ki|naplo]" >&2; exit 1 ;;
+    esac
+}
+
+dugalj() {
+    [[ "${1:-}" == or ]] && { shift; dugalj_or "$@"; return; }
+    [[ -r "$DUGALJ_ENV" ]] || { echo "Nincs meg: $DUGALJ_ENV" >&2; exit 1; }
+    set -a; . "$DUGALJ_ENV"; set +a
+    command -v kasa >/dev/null || { echo "Hiányzik a kasa (uv tool install python-kasa)" >&2; exit 1; }
+    case "${1:-allapot}" in
+        allapot)
+            kasa_hiv state | awk '/^== /&&!n++||/Device state|On since|RSSI|Firmware:/'
+            pi_el && echo "Pi: válaszol" || echo "Pi: NEM válaszol" ;;
+        be)
+            kasa_hiv on ;;
+        ki)
+            igen_e "Leállítod a Pi-t és lekapcsolod az áramot?" || exit 1
+            if pi_el; then
+                echo "Pi leállítása…"
+                ssh -o ConnectTimeout=8 "${GEP[pi]}" 'sudo systemctl poweroff' >/dev/null 2>&1
+                for _ in $(seq 60); do pi_el || break; sleep 2; done
+                echo "Nem válaszol már, még 20 mp a lemezeknek…"
+                sleep 20
+            fi
+            kasa_hiv off ;;
+        ujraindit)
+            igen_e "Kemény újraindítás (áramtalanítás) – biztos?" || exit 1
+            kasa_hiv off
+            sleep "${2:-10}"
+            kasa_hiv on
+            echo "Áram vissza, a Pi bootol (~2-5 perc)." ;;
+        *)
+            echo "park dugalj [allapot|be|ki|ujraindit [mp]]" >&2; exit 1 ;;
+    esac
+}
+
+case "${1:-}" in
+    "")
+        exec "$ITT/picloud" --host "${GEP[pi]},${GEP[nagy]}" ;;
+    figyel)
+        exec "$ITT/picloud" --host "${GEP[pi]},${GEP[nagy]}" --watch "${2:-5}" ;;
+    -h|--help|help|sugo)
+        sugo ;;
+    pi|nagy)
+        gep="$1"; shift
+        tavoli "$gep" "$@" ;;
+    dugalj)
+        shift
+        dugalj "$@" ;;
+    mind)
+        shift
+        [[ $# -gt 0 ]] || { sugo; exit 1; }
+        hiba=0
+        for gep in "${SORREND[@]}"; do
+            printf '\n\e[1;36m━━ %s (%s) ━━\e[0m\n' "$gep" "${GEP[$gep]}"
+            tavoli "$gep" "$@" || hiba=1
+        done
+        exit "$hiba" ;;
+    *)
+        printf 'Ismeretlen gép vagy parancs: %s\n\n' "$1" >&2
+        sugo >&2
+        exit 1 ;;
+esac

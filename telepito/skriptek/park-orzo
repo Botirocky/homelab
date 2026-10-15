@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PARK_DIR="${PARK_DIR:-/srv/szerverpark}"
+[[ -r /etc/szerverpark.conf ]] && source /etc/szerverpark.conf
+
+if [[ -t 1 ]]; then Z=$'\e[32m'; S=$'\e[33m'; P=$'\e[31m'; K=$'\e[36m'; N=$'\e[0m'; G=$'\e[90m'
+else Z=""; S=""; P=""; K=""; N=""; G=""; fi
+
+SZARAZ=0; NEMA=0
+
+sugo() {
+    cat <<'SUGO'
+park-orzo – őrszem: a leállt / egészségtelen park- konténereket újraindítja,
+és riaszt (park-ertesito), ha nem sikerül.
+
+  park-orzo                    egyszeri ellenőrzés + gyógyítás
+  park-orzo --szaraz           csak megmutatja, mit tenne
+  park-orzo --nema             ne küldjön értesítést
+  sudo park-orzo --telepit-idozito   5 percenkénti systemd időzítő beállítása
+SUGO
+}
+
+telepit_idozito() {
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Ehhez root kell: sudo park-orzo --telepit-idozito" >&2; exit 1; }
+    cat >/etc/systemd/system/park-orzo.service <<'SVC'
+[Unit]
+Description=Szerverpark őrszem – lefagyott konténerek újraindítása
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/park-orzo
+SVC
+    cat >/etc/systemd/system/park-orzo.timer <<'TMR'
+[Unit]
+Description=Szerverpark őrszem időzítő (5 percenként)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TMR
+    systemctl daemon-reload
+    systemctl enable --now park-orzo.timer >/dev/null 2>&1 || true
+    echo "${Z}Kész.${N} Az őrszem 5 percenként fut. Állapot: systemctl status park-orzo.timer"
+    exit 0
+}
+
+for a in "$@"; do
+    case "$a" in
+        --szaraz)          SZARAZ=1 ;;
+        --nema)            NEMA=1 ;;
+        --telepit-idozito) telepit_idozito ;;
+        -h|--help)         sugo; exit 0 ;;
+        *) echo "Ismeretlen kapcsoló: $a" >&2; exit 1 ;;
+    esac
+done
+
+command -v docker >/dev/null 2>&1 || { echo "docker nincs telepítve" >&2; exit 1; }
+
+ertesit() {
+    (( NEMA == 1 )) && return 0
+    command -v park-ertesito >/dev/null 2>&1 || return 0
+    park-ertesito "$1" "$2" "$3" >/dev/null 2>&1 || true
+}
+
+# A park- előtagú konténereken kívül azokat is figyeljük, amiket az
+# ORZO_EXTRA felsorol. Így a külön telepített dolgok (pl. a Pi-hole saját
+# compose-ból) sem maradnak ki – enélkül egy leállt Pi-hole DNS nélkül hagyja
+# a hálózatot, és senki nem indítja újra.
+konteneterek_listaja() {
+    docker ps -a --filter 'name=park-' --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null
+    local c
+    for c in ${ORZO_EXTRA:-}; do
+        docker ps -a --filter "name=^${c}$" --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null
+    done
+}
+
+tarolora_var() {
+    local t="${TAROLO_DIR:-/srv/tarolok}" hiba ut gyoker
+    t="${t%/}"
+    hiba="$(docker inspect -f '{{.State.Error}}' "$1" 2>/dev/null || true)"
+    [[ "$hiba" == *"'${t}/"* ]] || return 1
+    ut="${hiba#*"'${t}/"}"
+    gyoker="${t}/${ut%%[/\']*}"
+    mountpoint -q "$gyoker" && return 1
+    printf '%s' "$gyoker"
+}
+
+TAROLO_JEL="/run/park-orzo-hianyzo-tarolo"
+gyogyitott=(); sikertelen=(); varakozo=()
+
+while IFS='|' read -r nev state status; do
+    [[ -n "$nev" ]] || continue
+    health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$nev" 2>/dev/null || true)"
+
+    beteg=""; muvelet="restart"
+    if [[ "$state" != "running" ]]; then
+        if hianyzo="$(tarolora_var "$nev")"; then
+            varakozo+=("$nev → $hianyzo")
+            printf '%s•%s %s — a tárolója nincs felcsatolva (%s) → várok rá\n' "$S" "$N" "$nev" "$hianyzo"
+            continue
+        fi
+        beteg="áll ($state)"; muvelet="start"
+    elif [[ "$health" == "unhealthy" ]]; then
+        beteg="egészségtelen"; muvelet="restart"
+    elif [[ "$status" == Restarting* ]]; then
+        beteg="újraindulgat"; muvelet="restart"
+    fi
+    [[ -n "$beteg" ]] || continue
+
+    # A FUTÓ, de még "egészségtelen" konténereket türelmi időn belül békén
+    # hagyjuk: sok alkalmazás (Open WebUI, Paperless) percekig indul egy kis
+    # gépen, és a healthcheck addig hibát jelez. Újraindítani őket végtelen
+    # kört csinál – indulnak, nem érnek a végére, újraindulnak. Ami viszont
+    # egyáltalán NEM fut, azt azonnal elindítjuk.
+    if [[ "$state" == "running" ]]; then
+        inditva="$(docker inspect -f '{{.State.StartedAt}}' "$nev" 2>/dev/null || true)"
+        if [[ -n "$inditva" ]]; then
+            kor=$(( $(date +%s) - $(date -d "$inditva" +%s 2>/dev/null || echo 0) ))
+            ebren=$(( $(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0) ))
+            (( ebren > 0 && kor > ebren )) && kor=$ebren
+            if (( kor >= 0 && kor < ${ORZO_TUREM:-600} )); then
+                printf '%s•%s %s — %s, de csak %s mp-e indult → várok rá\n' \
+                    "$G" "$N" "$nev" "$beteg" "$kor"
+                continue
+            fi
+        fi
+    fi
+
+    if (( SZARAZ == 1 )); then
+        printf '%s•%s %s — %s → %s (szimuláció)\n' "$S" "$N" "$nev" "$beteg" "$muvelet"
+        continue
+    fi
+
+    printf '%s!%s %s — %s → %s…\n' "$S" "$N" "$nev" "$beteg" "$muvelet"
+    if docker "$muvelet" "$nev" >/dev/null 2>&1; then
+        sleep 3
+        ujstate="$(docker inspect -f '{{.State.Status}}' "$nev" 2>/dev/null || echo ismeretlen)"
+        if [[ "$ujstate" == "running" ]]; then
+            gyogyitott+=("$nev")
+            printf '  %s✔%s %s újra fut\n' "$Z" "$N" "$nev"
+        else
+            sikertelen+=("$nev ($ujstate)")
+            printf '  %s✘%s %s továbbra sem fut (%s)\n' "$P" "$N" "$nev" "$ujstate"
+        fi
+    else
+        sikertelen+=("$nev")
+        printf '  %s✘%s %s újraindítása nem sikerült\n' "$P" "$N" "$nev"
+    fi
+done < <(konteneterek_listaja)
+
+if (( ${#varakozo[@]} > 0 )); then
+    if (( SZARAZ == 0 )) && [[ ! -e "$TAROLO_JEL" ]]; then
+        ertesit "Őrszem: hiányzó tároló" "$(printf 'Ezek a konténerek a tárolójukra várnak – dugd be a lemezt:\n'; printf '%s\n' "${varakozo[@]}")" "hiba"
+        touch "$TAROLO_JEL" 2>/dev/null || true
+    fi
+else
+    rm -f "$TAROLO_JEL" 2>/dev/null || true
+fi
+
+if (( ${#gyogyitott[@]} == 0 && ${#sikertelen[@]} == 0 )); then
+    (( SZARAZ == 0 )) && printf '%sMinden park- konténer rendben.%s\n' "$G" "$N"
+    exit 0
+fi
+
+if (( ${#gyogyitott[@]} > 0 )); then
+    ertesit "Őrszem: újraindítva" "$(printf '%s\n' "${gyogyitott[@]}")" "figy"
+fi
+if (( ${#sikertelen[@]} > 0 )); then
+    ertesit "Őrszem: NEM sikerült helyreállítani" "$(printf '%s\n' "${sikertelen[@]}")" "hiba"
+    exit 2
+fi
+exit 0

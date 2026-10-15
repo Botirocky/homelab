@@ -1,0 +1,408 @@
+#!/usr/bin/env bash
+# park – a szerverpark kezelő parancsa
+# A telepítő teszi a /usr/local/bin/park helyre.
+set -euo pipefail
+
+PARK_DIR="${PARK_DIR:-/srv/szerverpark}"
+STACKEK="${PARK_DIR}/stackek"
+[[ -r /etc/szerverpark.conf ]] && source /etc/szerverpark.conf
+# Alapértékek, hogy a 'set -u' ne akadjon meg konfig nélkül sem
+ADAT_DIR="${ADAT_DIR:-${PARK_DIR}/adat}"
+BELSO_DOMAIN="${BELSO_DOMAIN:-park.lan}"
+
+if [[ -t 1 ]]; then Z=$'\e[32m'; S=$'\e[33m'; P=$'\e[31m'; K=$'\e[36m'; N=$'\e[0m'; G=$'\e[90m'
+else Z=""; S=""; P=""; K=""; N=""; G=""; fi
+
+stack_lista() { find "$STACKEK" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort; }
+
+stack_kell() {
+    local s="${1:-}"
+    [[ -n "$s" ]] || { echo "Melyik stack? ($(stack_lista | tr '\n' ' '))" >&2; exit 1; }
+    [[ -d "${STACKEK}/${s}" ]] || { echo "Nincs ilyen stack: $s" >&2; exit 1; }
+}
+
+sugo() {
+cat <<SUGO
+${K}park${N} – szerverpark kezelése
+
+  ${Z}park allapot${N}              mi fut, mi nem, mennyi hely van
+  ${Z}park indit${N} [stack]        indítás (stack nélkül: mind)
+  ${Z}park leallit${N} [stack]      leállítás
+  ${Z}park ujra${N} <stack>         újraindítás
+  ${Z}park naplo${N} <stack>        élő napló (Ctrl+C a kilépés)
+  ${Z}park frissit${N} [stack]      képfájlok frissítése + újraindítás
+  ${Z}park mentes${N}               azonnali mentés futtatása
+  ${Z}park mentesek${N}             a meglévő mentések listája
+  ${Z}park oldal${N} <domain>       új weboldal felvétele
+  ${Z}park tavoli${N} <név> <cél>   MÁSIK gép (pl. a Pi) szolgáltatása park.lan néven
+  ${Z}park tars${N}                 a társgép (Raspberry Pi) állapota
+  ${Z}park jelszavak${N}            a generált jelszavak kiírása
+  ${Z}park ai-katalogus${N}         letölthető AI modellek listája
+  ${Z}park ai-modellek${N}          mely modellek vannak fent
+  ${Z}park ai-modell${N} <név>      AI modell letöltése (pl. qwen2.5:7b)
+  ${Z}park ai-torol${N} <név>       AI modell törlése
+  ${Z}park ai-kulcs${N} <hol> <kulcs>  felhős kulcs (anthropic/openai/gemini/…), kipróbálja
+  ${Z}park ai-kulcs${N} lista | <hol> torol
+  ${Z}park takarit${N}              nem használt konténer-képek törlése
+
+  ${K}Felügyelet${N}
+  ${Z}park koszonto${N}             belépési üzenőfal (szolgáltatások, állapot)
+  ${Z}park egeszseg${N} [--json]    állapot-ellenőrzés (kilépési kóddal riaszt)
+  ${Z}park orzo${N} [--szaraz]      leállt konténerek újraindítása most
+  ${Z}park ertesit${N} <cím> <üz>   kézi/teszt értesítés (ntfy/Discord/e-mail)
+
+  ${K}Virtuális gépek${N}
+  ${Z}park lab${N} uj <név> [kép]    test-lab gép másodpercek alatt (Incus)
+  ${Z}park lab${N} lista|shell|torol
+  ${Z}park lab${N} pillanatkep <név> [cimke]   ${G}/${N} ${Z}park lab${N} vissza <név> <cimke>
+  ${Z}park vm${N} lista              libvirt VM-ek
+  ${Z}park vm${N} uj <név> <iso>     VM telepítése ISO-ból
+  ${Z}park vm${N} indit|leallit|konzol|torol <név>
+  ${Z}park vm${N} iso <url>          ISO letöltése a gyűjteménybe
+
+  Stackek: $(stack_lista | tr '\n' ' ')
+SUGO
+}
+
+parancs="${1:-sugo}"; shift || true
+
+case "$parancs" in
+allapot)
+    printf '\n%sKonténerek%s\n' "$K" "$N"
+    docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' \
+        | grep -E 'NAMES|park-' || echo "  (egy sem fut)"
+    printf '\n%sLemez%s\n' "$K" "$N"
+    df -h "$PARK_DIR" "${ADAT_DIR:-$PARK_DIR}" 2>/dev/null | sort -u
+    printf '\n%sMemória%s\n' "$K" "$N"
+    free -h | head -2
+    if systemctl is-enabled park-mentes.timer >/dev/null 2>&1; then
+        printf '\n%sKövetkező mentés%s\n  %s\n' "$K" "$N" \
+            "$(systemctl list-timers park-mentes.timer --no-pager --no-legend 2>/dev/null | awk '{print $1, $2, $3, $4}')"
+    fi
+    printf '\n'
+    ;;
+indit)
+    if [[ -n "${1:-}" ]]; then stack_kell "$1"; ( cd "${STACKEK}/$1" && docker compose up -d )
+    else for s in $(stack_lista); do echo "${Z}==${N} $s"; ( cd "${STACKEK}/$s" && docker compose up -d ); done; fi
+    ;;
+leallit)
+    if [[ -n "${1:-}" ]]; then stack_kell "$1"; ( cd "${STACKEK}/$1" && docker compose down )
+    else for s in $(stack_lista); do echo "${S}==${N} $s"; ( cd "${STACKEK}/$s" && docker compose down ); done; fi
+    ;;
+ujra)
+    stack_kell "${1:-}"; ( cd "${STACKEK}/$1" && docker compose restart )
+    ;;
+naplo)
+    stack_kell "${1:-}"; ( cd "${STACKEK}/$1" && docker compose logs -f --tail=100 )
+    ;;
+frissit)
+    frissit_egy() {
+        echo "${Z}==${N} $1"
+        ( cd "${STACKEK}/$1" && docker compose pull && docker compose up -d )
+    }
+    if [[ -n "${1:-}" ]]; then stack_kell "$1"; frissit_egy "$1"
+    else for s in $(stack_lista); do frissit_egy "$s"; done; fi
+    echo "${G}Tipp: 'park takarit' törli a régi képfájlokat.${N}"
+    ;;
+mentes)   exec /usr/local/bin/park-mentes ;;
+mentesek)
+    set -a; source "${PARK_DIR}/.env"; set +a
+    RESTIC_PASSWORD="$RESTIC_JELSZO" restic snapshots --repo "${MENTES_CEL}"
+    ;;
+oldal)
+    domain="${1:-}"
+    [[ -n "$domain" ]] || { echo "Használat: park oldal <domain>" >&2; exit 1; }
+    mappa="${PARK_DIR}/web/${domain}"
+    mkdir -p "$mappa"
+    [[ -f "$mappa/index.html" ]] || printf '<!doctype html><meta charset="utf-8">\n<h1>%s</h1>\n<p>Ide jönnek a fájlok: %s</p>\n' "$domain" "$mappa" >"$mappa/index.html"
+    cat >"${STACKEK}/proxy/sites.d/50-web-${domain}.caddy" <<CADDY
+${domain}, www.${domain} {
+	root * /srv/web/${domain}
+	file_server
+	encode gzip zstd
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		-Server
+	}
+}
+CADDY
+    docker exec park-caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+        && echo "${Z}Kész.${N} Töltsd fel ide: $mappa" \
+        || echo "${P}A Caddy újratöltése nem sikerült – park ujra proxy${N}"
+    echo "${G}Ne feledd: a domain A-rekordja erre az IP-re mutasson, és a 80/443 legyen átirányítva.${N}"
+    ;;
+tars)
+    conf=/etc/szerverpark-tars.conf
+    if [[ ! -f "$conf" ]]; then
+        echo "A társgép még nincs összekötve. Futtasd: sudo ./osszekotes.sh" >&2; exit 1
+    fi
+    source "$conf"
+    printf '\n%sTársgép:%s %s (%s)\n\n' "$K" "$N" "${PI_HOST_MENTETT}" "${PI_IP:-?}"
+
+    if ping -c1 -W2 "${PI_IP:-$PI_HOST_MENTETT}" >/dev/null 2>&1; then
+        echo "  ${Z}✔${N} hálózaton elérhető"
+    else
+        echo "  ${P}✘${N} nem válaszol pingre"
+    fi
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 park-tars 'true' 2>/dev/null; then
+        echo "  ${Z}✔${N} SSH működik (jelszó nélkül)"
+        echo
+        echo "${K}A Pi állapota:${N}"
+        ssh -o BatchMode=yes park-tars "uptime; echo; df -h ${PI_MENTES_UT:-/} 2>/dev/null | tail -1" 2>/dev/null | sed 's/^/  /'
+    else
+        echo "  ${P}✘${N} SSH nem megy – sudo ./osszekotes.sh --csak kulcs"
+    fi
+
+    echo
+    echo "${K}A Pi szolgáltatásai a park.lan alatt:${N}"
+    ls "${STACKEK}/proxy/sites.d/" 2>/dev/null | grep '^60-tavoli-' \
+        | sed 's/^60-tavoli-//; s/\.caddy$//' | sed 's/^/  http:\/\//; s/$/.'"${BELSO_DOMAIN}"'/' \
+        || echo "  (egy sincs bekötve)"
+
+    if [[ -n "${MENTES_TAVOLI:-}" ]] || grep -q '^MENTES_TAVOLI=' "${PARK_DIR}/.env" 2>/dev/null; then
+        echo
+        echo "${K}Mentés a Pi-n:${N}"
+        set -a; source "${PARK_DIR}/.env"; set +a
+        RESTIC_PASSWORD="$RESTIC_JELSZO" restic -r "$MENTES_TAVOLI" snapshots --latest 3 2>/dev/null \
+            | tail -6 | sed 's/^/  /' || echo "  (nem elérhető)"
+    fi
+    echo
+    ;;
+tavoli)
+    # Egy másik gépen (pl. a Raspberry Pi-n) futó szolgáltatás bekötése a
+    # park.lan névtérbe:  park tavoli csevego 192.168.1.42:8080
+    nev="${1:-}"; cel="${2:-}"
+    if [[ -z "$nev" || -z "$cel" ]]; then
+        cat >&2 <<HASZ
+Használat: park tavoli <név> <ip:port>
+
+  pl.: park tavoli csevego   100.64.0.1:8080    # a Pi csevegő appja
+       park tavoli ha        192.168.1.42:8123     # Home Assistant a Pi-n
+       park tavoli adguard   192.168.1.42:3000
+
+  Ettől a szolgáltatás elérhető lesz: http://<név>.${BELSO_DOMAIN}
+HASZ
+        exit 1
+    fi
+    cat >"${STACKEK}/proxy/sites.d/60-tavoli-${nev}.caddy" <<CADDY
+# Másik gépen futó szolgáltatás (a szerverpark proxyján keresztül).
+http://${nev}.${BELSO_DOMAIN} {
+	reverse_proxy ${cel}
+}
+CADDY
+    docker exec park-caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+        && echo "${Z}Kész:${N} http://${nev}.${BELSO_DOMAIN}  ->  ${cel}" \
+        || echo "${P}A Caddy újratöltése nem sikerült – park ujra proxy${N}"
+    echo "${G}Ne feledd a DNS-t: ${nev}.${BELSO_DOMAIN} is erre a gépre mutasson.${N}"
+    ;;
+jelszavak)
+    [[ -r "${PARK_DIR}/.env" ]] || { echo "Nincs .env" >&2; exit 1; }
+    printf '\n%sGenerált jelszavak (%s)%s\n\n' "$K" "${PARK_DIR}/.env" "$N"
+    grep -E 'JELSZO|SECRET|TOKEN' "${PARK_DIR}/.env" | while IFS='=' read -r k v; do
+        printf '  %-26s %s\n' "$k" "$v"
+    done
+    printf '\n'
+    ;;
+ai-katalogus)
+    kat="${PARK_DIR}/ai-katalogus.txt"
+    [[ -f "$kat" ]] || { echo "Nincs katalógus: $kat" >&2; exit 1; }
+    fent="$(docker exec park-ollama ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' || true)"
+    printf '\n%s%-24s %-9s %-6s %-12s %s%s\n\n' "$K" "MODELL" "MÉRET" "RAM" "MIRE JÓ" "LEÍRÁS" "$N"
+    grep -v '^#' "$kat" | grep -v '^$' | while IFS='|' read -r tag meret ram kat_ leiras; do
+        jel=" "; grep -qx "$tag" <<<"$fent" && jel="${Z}✔${N}"
+        printf ' %b %-22s %-9s %-6s %-12s %s\n' "$jel" "$tag" "$meret" "${ram} GB" "$kat_" "$leiras"
+    done
+    printf '\n  %s✔ = már fent van.  Letöltés: park ai-modell <név>%s\n\n' "$G" "$N"
+    ;;
+ai-modellek)
+    docker exec park-ollama ollama list
+    echo
+    echo "${G}Felhős modellek (LiteLLM):${N}"
+    set -a; source "${PARK_DIR}/.env"; set +a
+    curl -s -H "Authorization: Bearer ${LITELLM_KULCS}" http://localhost:4000/v1/models 2>/dev/null \
+        | grep -o '"id":"[^"]*"' | cut -d'"' -f4 | sed 's/^/  /' || echo "  (a LiteLLM nem válaszol)"
+    ;;
+ai-modell)
+    modell="${1:-}"
+    [[ -n "$modell" ]] || { echo "Használat: park ai-modell <név>   pl. qwen2.5:7b" >&2; exit 1; }
+    docker exec -it park-ollama ollama pull "$modell"
+    park-ai-konfig | grep -q frissítve && ( cd "${STACKEK}/ai" && docker compose up -d --force-recreate litellm >/dev/null 2>&1 ) || true
+    ;;
+ai-torol)
+    modell="${1:-}"
+    [[ -n "$modell" ]] || { echo "Használat: park ai-torol <név>" >&2; exit 1; }
+    docker exec -it park-ollama ollama rm "$modell"
+    park-ai-konfig | grep -q frissítve && ( cd "${STACKEK}/ai" && docker compose up -d --force-recreate litellm >/dev/null 2>&1 ) || true
+    ;;
+ai-kulcs)
+    hol="${1:-}"; kulcs="${2:-}"
+    env="${PARK_DIR}/.env"
+    declare -A AI_VALTOZO=(
+        [anthropic]=ANTHROPIC_API_KEY [openai]=OPENAI_API_KEY [gemini]=GEMINI_API_KEY
+        [groq]=GROQ_API_KEY [mistral]=MISTRAL_API_KEY [deepseek]=DEEPSEEK_API_KEY
+        [xai]=XAI_API_KEY [openrouter]=OPENROUTER_API_KEY
+    )
+    case "$hol" in google) hol=gemini ;; grok) hol=xai ;; claude) hol=anthropic ;; esac
+
+    ai_ujraepit() {
+        PARK_DIR="$PARK_DIR" park-ai-konfig | sed 's/^/  /'
+        echo "Átjáró újraindítása…"
+        ( cd "${STACKEK}/ai" && docker compose up -d --force-recreate litellm >/dev/null 2>&1 ) \
+            || { echo "${P}A LiteLLM nem indult újra:${N} park naplo ai" >&2; return 1; }
+        local i
+        for i in $(seq 1 30); do
+            curl -sf -m3 http://localhost:4000/health/liveliness >/dev/null 2>&1 && break
+            sleep 2
+        done
+    }
+
+    if [[ "$hol" == lista ]]; then
+        printf '\n%sFelhős AI-kulcsok%s\n\n' "$K" "$N"
+        for sz in anthropic openai gemini groq mistral deepseek xai openrouter; do
+            ertek="$(grep -E "^${AI_VALTOZO[$sz]}=" "$env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"')"
+            if [[ -n "$ertek" ]]; then
+                printf '  %s✔%s %-11s %s…%s\n' "$Z" "$N" "$sz" "${ertek:0:7}" "${ertek: -4}"
+            else
+                printf '  %s·%s %-11s %s(nincs)%s\n' "$G" "$N" "$sz" "$G" "$N"
+            fi
+        done
+        printf '\n'
+        exit 0
+    fi
+
+    if [[ -z "$hol" || -z "$kulcs" || -z "${AI_VALTOZO[$hol]:-}" ]]; then
+        [[ -n "$hol" && -z "${AI_VALTOZO[$hol]:-}" ]] && echo "Ismeretlen szolgáltató: $hol" >&2
+        cat >&2 <<HASZ
+Használat: park ai-kulcs <szolgáltató> <api-kulcs>   kulcs mentése (előtte kipróbálja)
+           park ai-kulcs <szolgáltató> torol         kulcs törlése
+           park ai-kulcs lista                       mi van beállítva
+
+  anthropic   – Claude          (https://console.anthropic.com)
+  openai      – GPT             (https://platform.openai.com)
+  gemini      – Google Gemini   (https://aistudio.google.com – ingyenes keret)
+  groq        – gyors, ingyenes keret (https://console.groq.com)
+  mistral | deepseek | xai | openrouter
+HASZ
+        exit 1
+    fi
+    valtozo="${AI_VALTOZO[$hol]}"
+    touch "$env"; chmod 600 "$env"
+
+    if [[ "$kulcs" == torol ]]; then
+        sed -i "/^${valtozo}=/d" "$env"
+        printf '%s=\n' "$valtozo" >>"$env"
+        echo "${Z}Kulcs törölve:${N} $hol"
+        ai_ujraepit
+        exit 0
+    fi
+
+    printf 'Kulcs kipróbálása a(z) %s-nál… ' "$hol"
+    case "$hol" in
+        anthropic)  kod="$(curl -s -o /dev/null -m15 -w '%{http_code}' https://api.anthropic.com/v1/models \
+                        -H "x-api-key: $kulcs" -H "anthropic-version: 2023-06-01")" ;;
+        openai)     kod="$(curl -s -o /dev/null -m15 -w '%{http_code}' https://api.openai.com/v1/models -H "Authorization: Bearer $kulcs")" ;;
+        gemini)     kod="$(curl -s -o /dev/null -m15 -w '%{http_code}' "https://generativelanguage.googleapis.com/v1beta/models?key=$kulcs")" ;;
+        groq)       kod="$(curl -s -o /dev/null -m15 -w '%{http_code}' https://api.groq.com/openai/v1/models -H "Authorization: Bearer $kulcs")" ;;
+        mistral)    kod="$(curl -s -o /dev/null -m15 -w '%{http_code}' https://api.mistral.ai/v1/models -H "Authorization: Bearer $kulcs")" ;;
+        deepseek)   kod="$(curl -s -o /dev/null -m15 -w '%{http_code}' https://api.deepseek.com/models -H "Authorization: Bearer $kulcs")" ;;
+        xai)        kod="$(curl -s -o /dev/null -m15 -w '%{http_code}' https://api.x.ai/v1/models -H "Authorization: Bearer $kulcs")" ;;
+        openrouter) kod="$(curl -s -o /dev/null -m15 -w '%{http_code}' https://openrouter.ai/api/v1/key -H "Authorization: Bearer $kulcs")" ;;
+    esac
+    case "$kod" in
+        200) echo "${Z}érvényes${N}" ;;
+        401|403) echo "${P}ÉRVÉNYTELEN (HTTP $kod)${N} – nem mentettem el." >&2; exit 1 ;;
+        *) echo "${S}nem tudtam ellenőrizni (HTTP ${kod:-?})${N} – azért elmentem." ;;
+    esac
+
+    sed -i "/^${valtozo}=/d" "$env"
+    printf '%s=%s\n' "$valtozo" "$kulcs" >>"$env"
+    echo "${Z}Kulcs elmentve.${N}"
+    ai_ujraepit
+    echo "A modellek az Open WebUI-ban (http://ai.park.lan) frissítés után látszanak. Lista: park ai-modellek"
+    ;;
+lab)
+    al="${1:-lista}"; shift || true
+    case "$al" in
+        uj)
+            nev="${1:-}"; kep="${2:-images:debian/13/cloud}"
+            [[ -n "$nev" ]] || { echo "Használat: park lab uj <név> [kép]" >&2; exit 1; }
+            echo "${Z}Indítás:${N} $nev  ($kep, virtuális gép)"
+            incus launch "$kep" "$nev" --vm \
+                -c limits.cpu="${LAB_CPU:-2}" -c limits.memory="${LAB_RAM:-2GiB}"
+            echo
+            echo "  belépés:      park lab shell $nev"
+            echo "  pillanatkép:  park lab pillanatkep $nev tiszta"
+            ;;
+        lista|"") incus list ;;
+        shell)
+            nev="${1:-}"; [[ -n "$nev" ]] || { echo "Használat: park lab shell <név>" >&2; exit 1; }
+            incus exec "$nev" -- bash || incus exec "$nev" -- sh ;;
+        pillanatkep)
+            nev="${1:-}"; cimke="${2:-$(date +%Y%m%d-%H%M)}"
+            [[ -n "$nev" ]] || { echo "Használat: park lab pillanatkep <név> [cimke]" >&2; exit 1; }
+            incus snapshot "$nev" "$cimke" && echo "${Z}Pillanatkép kész:${N} $nev/$cimke" ;;
+        vissza)
+            nev="${1:-}"; cimke="${2:-}"
+            [[ -n "$nev" && -n "$cimke" ]] || { echo "Használat: park lab vissza <név> <cimke>" >&2; exit 1; }
+            incus restore "$nev" "$cimke" && echo "${Z}Visszaállítva:${N} $nev -> $cimke" ;;
+        torol)
+            nev="${1:-}"; [[ -n "$nev" ]] || { echo "Használat: park lab torol <név>" >&2; exit 1; }
+            incus delete -f "$nev" && echo "${S}Törölve:${N} $nev" ;;
+        kepek)   incus image list images: | head -40 ;;
+        *) echo "Ismeretlen: park lab $al" >&2; exit 1 ;;
+    esac
+    ;;
+vm)
+    al="${1:-lista}"; shift || true
+    case "$al" in
+        lista|"")
+            virsh list --all
+            echo; echo "${G}ISO-k: ${ADAT_DIR}/vm/iso${N}"
+            ls -1sh "${ADAT_DIR}/vm/iso" 2>/dev/null | tail -n +2 || true ;;
+        uj)
+            nev="${1:-}"; iso="${2:-}"
+            if [[ -z "$nev" || -z "$iso" ]]; then
+                echo "Használat: park vm uj <név> <iso-fájl vagy -útvonal>" >&2
+                echo "  pl.: park vm uj win11 ${ADAT_DIR}/vm/iso/win11.iso" >&2; exit 1
+            fi
+            [[ -f "$iso" ]] || iso="${ADAT_DIR}/vm/iso/$iso"
+            [[ -f "$iso" ]] || { echo "Nincs ilyen ISO: $iso" >&2; exit 1; }
+            virt-install --name "$nev" \
+                --memory "${VM_RAM:-4096}" --vcpus "${VM_CPU:-2}" \
+                --disk path="${ADAT_DIR}/vm/lemezek/${nev}.qcow2,size=${VM_LEMEZ:-40},format=qcow2" \
+                --cdrom "$iso" --os-variant "${VM_OS:-generic}" \
+                --network network=default --graphics vnc,listen=127.0.0.1 \
+                --noautoconsole
+            echo "${Z}Létrehozva.${N} Képernyő: a Cockpit webfelületen (vm.${BELSO_DOMAIN:-park.lan})" ;;
+        indit)    virsh start "${1:?név kell}" ;;
+        leallit)  virsh shutdown "${1:?név kell}" ;;
+        konzol)   virsh console "${1:?név kell}" ;;
+        torol)
+            nev="${1:?név kell}"
+            read -rp "Biztosan törlöd a(z) $nev VM-et a lemezével együtt? [i/N] " v
+            [[ "${v,,}" == "i" ]] || exit 0
+            virsh destroy "$nev" 2>/dev/null || true
+            virsh undefine "$nev" --remove-all-storage --nvram 2>/dev/null || virsh undefine "$nev"
+            echo "${S}Törölve:${N} $nev" ;;
+        iso)
+            url="${1:?ISO URL kell}"
+            cel="${ADAT_DIR}/vm/iso"
+            mkdir -p "$cel"
+            echo "Letöltés ide: $cel"
+            curl -L --progress-bar -O --output-dir "$cel" "$url" && ls -sh "$cel" | tail -3 ;;
+        *) echo "Ismeretlen: park vm $al" >&2; exit 1 ;;
+    esac
+    ;;
+takarit)
+    docker image prune -af
+    docker volume prune -f
+    df -h "$PARK_DIR" | tail -1
+    ;;
+koszonto) exec park-koszonto "$@" ;;
+egeszseg) exec park-egeszseg "$@" ;;
+orzo)     exec park-orzo "$@" ;;
+ertesit)  exec park-ertesito "$@" ;;
+sugo|-h|--help|help) sugo ;;
+*) echo "Ismeretlen parancs: $parancs" >&2; sugo; exit 1 ;;
+esac

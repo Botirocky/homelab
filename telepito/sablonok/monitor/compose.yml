@@ -1,0 +1,36 @@
+services:
+  beszel:
+    image: henrygd/beszel:latest
+    container_name: park-beszel
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    volumes:
+      - ${ADAT_DIR}/beszel/data:/beszel_data
+      - ${ADAT_DIR}/beszel/socket:/beszel_socket
+    environment:
+      TZ: ${TZ}
+      APP_URL: http://monitor.${BELSO_DOMAIN}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+  beszel-agent:
+    image: henrygd/beszel-agent:latest
+    container_name: park-beszel-agent
+    restart: unless-stopped
+    network_mode: host
+    profiles: [ugynok]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${ADAT_DIR}/beszel/socket:/beszel_socket
+      - ${ADAT_DIR}/beszel/agent:/var/lib/beszel-agent
+    environment:
+      LISTEN: /beszel_socket/beszel.sock
+      KEY: ${BESZEL_KULCS:-}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+
+networks:
+  park:
+    external: true

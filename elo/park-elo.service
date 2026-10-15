@@ -1,0 +1,12 @@
+[Unit]
+Description=park: élő szerverterem (picloud vizualizáció, elo.park.lan)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/park-elo
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

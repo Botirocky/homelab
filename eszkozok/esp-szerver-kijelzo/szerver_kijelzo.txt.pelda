@@ -1,0 +1,5 @@
+wifi_ssid=WIFI_NEVE
+wifi_jelszo=WIFI_JELSZAVA
+url=http://192.168.1.185/allapot.json
+nev=picloud
+forditott=1

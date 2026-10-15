@@ -1,0 +1,29 @@
+# Reverse proxy – ez fogadja a 80/443-at, és osztja szét a szolgáltatások közé.
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: park-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./sites.d:/etc/caddy/sites.d:ro
+      - ${PARK_DIR}/web:/srv/web:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      TZ: ${TZ}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [park]
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  park:
+    external: true

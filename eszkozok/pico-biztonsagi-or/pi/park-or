@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+import json
+import os
+import queue
+import re
+import secrets
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+
+KONF = "/etc/park-or.conf"
+UNIT = "/etc/systemd/system/park-or.service"
+F2B_NAPLO = "/var/log/fail2ban.log"
+
+SUGO = """park-or – biztonsági őr: SSH-belépés, sudo és fail2ban-tiltás → Pico (OLED + buzzer)
+
+  park-or                  figyelés (a park-or.service ezt futtatja)
+  park-or --teszt          próbariasztás a Picóra
+  park-or --allapot        a Pico állapota (számlálók, utolsó események)
+  park-or --nyugta         a riasztás nyugtázása távolról
+  park-or --naplo [N]      a Pico SD-kártyás naplójának utolsó N sora (alap 50)
+  sudo park-or --keres     a Pico megkeresése a MAC-címe alapján (ha új IP-t kapott)
+  park-or --kulcs          a közös kulcs kiírása (a Pico titkok.py-jához)
+  sudo park-or --telepit   konfig + systemd szolgáltatás beállítása
+
+Konfig: /etc/park-or.conf (PICO_CIM, PICO_MAC, KULCS, ISMERT_IP, ISMERT_FELHASZNALO, CSEND_TOL, CSEND_IG)"""
+
+ALAP = {
+    "PICO_CIM": "or.local:8080",
+    "PICO_MAC": "",
+    "KULCS": "",
+    "ISMERT_IP": "",
+    "ISMERT_FELHASZNALO": "picloud",
+    "CSEND_TOL": "22",
+    "CSEND_IG": "7",
+}
+
+RE_BELEPES = re.compile(r"Accepted (\S+) for (\S+) from (\S+) port")
+RE_SIKERTELEN = re.compile(r"(?:Failed \S+ for (?:invalid user )?(\S+)|Invalid user (\S*)) from (\S+)")
+RE_SUDO = re.compile(r"^\s*(\S+) : .*?COMMAND=(.*)$")
+RE_SUDO_HIBA = re.compile(r"^\s*(\S+) : (?:\d+ )?incorrect password attempts?")
+RE_TILTAS = re.compile(r"\[(\S+)\] Ban (\S+)")
+
+
+def konf_olvas():
+    k = dict(ALAP)
+    try:
+        with open(KONF) as f:
+            for sor in f:
+                sor = sor.strip()
+                if sor and not sor.startswith("#") and "=" in sor:
+                    kulcs, ertek = sor.split("=", 1)
+                    k[kulcs.strip()] = ertek.strip().strip('"')
+    except FileNotFoundError:
+        pass
+    k["ISMERT_IP"] = set(k["ISMERT_IP"].replace(",", " ").split())
+    k["ISMERT_FELHASZNALO"] = set(k["ISMERT_FELHASZNALO"].replace(",", " ").split())
+    return k
+
+
+def konf_ir(kulcs, ertek):
+    sorok = []
+    megvan = False
+    with open(KONF) as f:
+        for sor in f:
+            if sor.split("=", 1)[0].strip() == kulcs:
+                sor = f'{kulcs}="{ertek}"\n'
+                megvan = True
+            sorok.append(sor)
+    if not megvan:
+        sorok.append(f'{kulcs}="{ertek}"\n')
+    ideiglenes = KONF + ".uj"
+    old = os.umask(0o077)
+    with open(ideiglenes, "w") as f:
+        f.writelines(sorok)
+    os.umask(old)
+    os.replace(ideiglenes, KONF)
+
+
+def mac_ip(mac):
+    kimenet = subprocess.run(["ip", "-4", "neigh"], capture_output=True, text=True).stdout
+    for sor in kimenet.splitlines():
+        reszek = sor.split()
+        if "lladdr" in reszek and reszek[reszek.index("lladdr") + 1].lower() == mac \
+                and reszek[-1] not in ("FAILED", "INCOMPLETE"):
+            return reszek[0]
+    return None
+
+
+def halo_pingel():
+    kimenet = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"], capture_output=True, text=True).stdout.split()
+    if "src" not in kimenet:
+        return
+    alap = kimenet[kimenet.index("src") + 1].rsplit(".", 1)[0]
+    with ThreadPoolExecutor(64) as p:
+        list(p.map(lambda i: subprocess.run(["ping", "-c", "1", "-W", "1", "-n", f"{alap}.{i}"],
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL), range(1, 255)))
+
+
+def ejszaka(k, ora=None):
+    ora = datetime.now().hour if ora is None else ora
+    tol, ig = int(k["CSEND_TOL"]), int(k["CSEND_IG"])
+    return ora >= tol or ora < ig if tol > ig else tol <= ora < ig
+
+
+def ismert_ip(k, ip):
+    return ip in k["ISMERT_IP"] or ip.startswith("100.")
+
+
+def ertelmez(k, forras, uzenet):
+    ido = datetime.now().strftime("%H:%M")
+    if forras == "ssh":
+        m = RE_BELEPES.search(uzenet)
+        if m:
+            modszer, ki, honnan = m.groups()
+            ismert = ki in k["ISMERT_FELHASZNALO"] and ismert_ip(k, honnan)
+            return {"tipus": "belepes", "szint": "nema" if ismert else "hangos",
+                    "ki": ki, "honnan": honnan, "reszlet": modszer, "ido": ido}
+        m = RE_SIKERTELEN.search(uzenet)
+        if m:
+            ki = m.group(1) or m.group(2) or "?"
+            return {"tipus": "sikertelen", "szint": "nema", "ki": ki,
+                    "honnan": m.group(3), "reszlet": "sikertelen", "ido": ido}
+    elif forras == "sudo":
+        m = RE_SUDO_HIBA.search(uzenet)
+        if m:
+            return {"tipus": "sudo_hiba", "szint": "hangos", "ki": m.group(1),
+                    "honnan": "helyi", "reszlet": "rossz jelszo", "ido": ido}
+        m = RE_SUDO.search(uzenet)
+        if m:
+            ki, parancs = m.groups()
+            return {"tipus": "sudo", "szint": "nema" if ki in k["ISMERT_FELHASZNALO"] else "hangos",
+                    "ki": ki, "honnan": "helyi", "reszlet": os.path.basename(parancs.split()[0]) if parancs else "",
+                    "ido": ido}
+    elif forras == "f2b":
+        m = RE_TILTAS.search(uzenet)
+        if m:
+            jail, ip = m.groups()
+            return {"tipus": "tiltas", "szint": "nema" if ejszaka(k) else "halk",
+                    "ki": jail, "honnan": ip, "reszlet": "kitiltva", "ido": ido}
+    return None
+
+
+class Kuldo:
+    def __init__(self, k):
+        self.k = k
+        self.sor = queue.Queue(maxsize=50)
+        self.zar = threading.Lock()
+        self.utolso_kereses = 0
+
+    def keres(self, modszer, ut, adat=None, idokorlat=4):
+        torzs = json.dumps(adat).encode() if adat is not None else None
+        req = urllib.request.Request("http://" + self.k["PICO_CIM"] + ut, data=torzs, method=modszer,
+                                     headers={"X-Kulcs": self.k["KULCS"], "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=idokorlat) as v:
+            return json.loads(v.read() or b"{}")
+
+    def felderit(self, kenyszer=False):
+        mac = self.k.get("PICO_MAC", "").lower()
+        if not mac:
+            return False
+        with self.zar:
+            if not kenyszer and time.time() - self.utolso_kereses < 120:
+                return False
+            self.utolso_kereses = time.time()
+            ip = mac_ip(mac)
+            if not ip:
+                halo_pingel()
+                ip = mac_ip(mac)
+            if not ip:
+                print("a Pico nem található a hálón:", mac, flush=True)
+                return False
+            regi = self.k["PICO_CIM"]
+            uj = ip + ":" + (regi.rsplit(":", 1)[1] if ":" in regi else "8080")
+            if uj == regi:
+                return False
+            self.k["PICO_CIM"] = uj
+            try:
+                self.keres("GET", "/allapot")
+            except Exception as hiba:
+                print("a talált cím nem a Pico (vagy rossz a kulcs):", uj, hiba, flush=True)
+                self.k["PICO_CIM"] = regi
+                return False
+            try:
+                konf_ir("PICO_CIM", uj)
+            except OSError as hiba:
+                print("a konfig nem írható:", hiba, flush=True)
+            print(f"a Pico új címe: {regi} → {uj}", flush=True)
+            caddy_frissit(uj)
+            return True
+
+    def tesz(self, e):
+        try:
+            self.sor.put_nowait(e)
+        except queue.Full:
+            self.sor.get_nowait()
+            self.sor.put_nowait(e)
+
+    def fut(self):
+        while True:
+            e = self.sor.get()
+            for kiseret in range(5):
+                try:
+                    self.keres("POST", "/esemeny", e)
+                    break
+                except Exception as hiba:
+                    if kiseret == 4:
+                        print("nem sikerült elküldeni:", e, hiba, flush=True)
+                    elif kiseret == 0 and self.felderit():
+                        continue
+                    time.sleep(2 * (kiseret + 1))
+
+    def eletjel(self):
+        while True:
+            try:
+                self.keres("POST", "/eletjel", {})
+            except Exception:
+                if self.felderit():
+                    continue
+            time.sleep(60)
+
+
+CADDY_VHOST = "/srv/szerverpark/stackek/proxy/sites.d/81-or.caddy"
+
+
+def caddy_frissit(cim):
+    try:
+        with open(CADDY_VHOST) as f:
+            regi = f.read()
+    except OSError:
+        return
+    uj = re.sub(r"reverse_proxy\s+\S+", "reverse_proxy " + cim, regi, count=1)
+    if uj == regi:
+        return
+    try:
+        with open(CADDY_VHOST, "w") as f:
+            f.write(uj)
+        subprocess.run(["docker", "exec", "park-caddy", "caddy", "reload", "--config", "/etc/caddy/Caddyfile"],
+                       capture_output=True, timeout=30)
+        print("Caddy (or.park.lan) átírva:", cim, flush=True)
+    except (OSError, subprocess.SubprocessError) as hiba:
+        print("a Caddy vhost nem frissíthető:", hiba, flush=True)
+
+
+def journal_figyel(k, kuldo):
+    while True:
+        p = subprocess.Popen(["journalctl", "-f", "-n", "0", "-o", "json",
+                              "SYSLOG_IDENTIFIER=sshd-session", "SYSLOG_IDENTIFIER=sshd",
+                              "SYSLOG_IDENTIFIER=sudo"], stdout=subprocess.PIPE, text=True)
+        for sor in p.stdout:
+            try:
+                j = json.loads(sor)
+            except ValueError:
+                continue
+            uzenet = j.get("MESSAGE")
+            if not isinstance(uzenet, str):
+                continue
+            forras = "sudo" if j.get("SYSLOG_IDENTIFIER") == "sudo" else "ssh"
+            e = ertelmez(k, forras, uzenet)
+            if e:
+                print("esemény:", e, flush=True)
+                kuldo.tesz(e)
+        p.wait()
+        time.sleep(5)
+
+
+def f2b_figyel(k, kuldo):
+    while True:
+        if not os.path.exists(F2B_NAPLO):
+            time.sleep(30)
+            continue
+        p = subprocess.Popen(["tail", "-n", "0", "-F", F2B_NAPLO], stdout=subprocess.PIPE, text=True,
+                             stderr=subprocess.DEVNULL)
+        for sor in p.stdout:
+            e = ertelmez(k, "f2b", sor)
+            if e:
+                print("esemény:", e, flush=True)
+                kuldo.tesz(e)
+        p.wait()
+        time.sleep(5)
+
+
+def telepit():
+    if os.geteuid() != 0:
+        sys.exit("Ehhez root kell: sudo park-or --telepit")
+    if not os.path.exists(KONF):
+        cim = input("A Pico címe (pl. 192.168.1.50:8080) [or.local:8080]: ").strip() or "or.local:8080"
+        mac = os.environ.get("PARK_OR_MAC", "")
+        kulcs = os.environ.get("PARK_OR_KULCS") or secrets.token_urlsafe(18)
+        old = os.umask(0o077)
+        with open(KONF, "w") as f:
+            f.write(f'PICO_CIM="{cim}"\nPICO_MAC="{mac}"\nKULCS="{kulcs}"\nISMERT_IP=""\n'
+                    f'ISMERT_FELHASZNALO="picloud"\nCSEND_TOL="22"\nCSEND_IG="7"\n')
+        os.umask(old)
+        print("Konfig kész:", KONF)
+    with open(UNIT, "w") as f:
+        f.write("""[Unit]
+Description=park-or: biztonsági őr (SSH/sudo/fail2ban → Pico)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/park-or
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+""")
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "enable", "--now", "park-or.service"], check=True)
+    subprocess.run(["systemctl", "restart", "park-or.service"], check=True)
+    print("park-or.service fut. Próba: sudo park-or --teszt")
+
+
+def main():
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg in ("-h", "--help", "--sugo"):
+        print(SUGO)
+        return
+    if arg == "--telepit":
+        telepit()
+        return
+    k = konf_olvas()
+    if not k["KULCS"]:
+        sys.exit(f"Nincs KULCS a {KONF} fájlban (sudo park-or --telepit).")
+    kuldo = Kuldo(k)
+    if arg == "--kulcs":
+        print(k["KULCS"])
+    elif arg == "--keres":
+        if not k["PICO_MAC"]:
+            sys.exit(f"Nincs PICO_MAC a {KONF} fájlban.")
+        if kuldo.felderit(kenyszer=True):
+            print("Frissítve:", k["PICO_CIM"], "(a szolgáltatás újraindítása: sudo systemctl restart park-or)")
+        else:
+            print("Nem kellett változtatni, vagy nem található. Jelenlegi cím:", k["PICO_CIM"])
+    elif arg == "--teszt":
+        kuldo.keres("POST", "/esemeny", {"tipus": "teszt", "szint": "hangos", "ki": os.uname().nodename,
+                                         "honnan": "park-or --teszt", "reszlet": "proba",
+                                         "ido": datetime.now().strftime("%H:%M")})
+        print("Próbariasztás elküldve. Nyugtázás: BOOTSEL a Picón, vagy park-or --nyugta")
+    elif arg == "--nyugta":
+        kuldo.keres("POST", "/nyugta", {})
+        print("Nyugtázva.")
+    elif arg == "--naplo":
+        n = sys.argv[2] if len(sys.argv) > 2 else "50"
+        v = kuldo.keres("GET", "/naplo?n=" + n)
+        if not v.get("sd"):
+            print("A Picón nincs (működő) SD-kártya.")
+        for sor in v.get("sorok", []):
+            print(sor.replace(";", "  "))
+    elif arg == "--allapot":
+        print(json.dumps(kuldo.keres("GET", "/allapot"), ensure_ascii=False, indent=2))
+    elif arg == "":
+        threading.Thread(target=kuldo.fut, daemon=True).start()
+        threading.Thread(target=kuldo.eletjel, daemon=True).start()
+        threading.Thread(target=f2b_figyel, args=(k, kuldo), daemon=True).start()
+        print("park-or figyel →", k["PICO_CIM"], flush=True)
+        journal_figyel(k, kuldo)
+    else:
+        print(SUGO)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

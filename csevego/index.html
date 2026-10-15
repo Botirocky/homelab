@@ -1,0 +1,1181 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#05070d">
+<meta name="referrer" content="no-referrer">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<title>Privát Csevegő</title>
+<style>
+  :root {
+    --bg: #05070d;
+    --surface: rgba(255,255,255,.045);
+    --surface-2: rgba(255,255,255,.08);
+    --border: rgba(255,255,255,.09);
+    --text: #eef1f8;
+    --muted: #97a0b5;
+    --primary: #2563eb;
+    --primary-2: #6366f1;
+    --accent: #10b981;
+    --warn: #f59e0b;
+    --danger: #ef4444;
+    --me-bubble: linear-gradient(135deg, #2563eb, #4f46e5);
+    --radius: 14px;
+    --ring: 0 0 0 3px rgba(99,102,241,.45);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  button { font: inherit; cursor: pointer; }
+  input { font: inherit; }
+  :focus-visible { outline: none; box-shadow: var(--ring); border-radius: 8px; }
+  svg.ic { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none;
+           stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+  .aurora { position: fixed; inset: 0; z-index: -1; overflow: hidden; }
+  .aurora::before, .aurora::after {
+    content: ""; position: absolute; width: 60vmax; height: 60vmax;
+    border-radius: 50%; filter: blur(90px); opacity: .16;
+  }
+  .aurora::before {
+    background: radial-gradient(circle, #2563eb, transparent 65%);
+    top: -22vmax; left: -12vmax;
+    animation: drift1 26s ease-in-out infinite alternate;
+  }
+  .aurora::after {
+    background: radial-gradient(circle, #7c3aed, transparent 65%);
+    bottom: -25vmax; right: -14vmax;
+    animation: drift2 32s ease-in-out infinite alternate;
+  }
+  @keyframes drift1 { to { transform: translate(9vmax, 7vmax) scale(1.15); } }
+  @keyframes drift2 { to { transform: translate(-8vmax, -6vmax) scale(1.1); } }
+  .aurora { animation: hue-drift 36s ease-in-out infinite alternate; }
+  .aurora .blob {
+    display: block; position: absolute; border-radius: 50%;
+    width: 44vmax; height: 44vmax; top: 32%; left: 36%;
+    background: radial-gradient(circle, #0ea5e9, transparent 65%);
+    filter: blur(90px); opacity: .1;
+    animation: drift3 38s ease-in-out infinite alternate;
+  }
+  @keyframes drift3 { to { transform: translate(-10vmax, 8vmax) scale(1.25); } }
+  @keyframes hue-drift { to { filter: hue-rotate(45deg); } }
+
+  .glass {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+  }
+
+  #login {
+    margin: auto;
+    border-radius: 20px;
+    padding: 2.2rem 2rem;
+    width: min(92vw, 400px);
+    display: flex; flex-direction: column; gap: .9rem;
+    box-shadow: 0 24px 80px rgba(0,0,0,.55);
+    animation: card-in .35s cubic-bezier(.2,.9,.3,1.2) both;
+  }
+  @keyframes card-in { from { opacity: 0; transform: translateY(16px) scale(.97); } }
+  #login .logo { display: flex; align-items: center; gap: .6rem; justify-content: center; }
+  #login .logo svg { width: 34px; height: 34px; }
+  #login h1 { font-size: 1.3rem; font-weight: 700; letter-spacing: -.01em; }
+  #login .sub { color: var(--muted); font-size: .85rem; text-align: center; margin-bottom: .4rem; }
+  .field { display: flex; flex-direction: column; gap: .3rem; }
+  .field label { font-size: .8rem; font-weight: 500; color: var(--muted); }
+  .field input {
+    background: rgba(0,0,0,.35);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: .75rem .95rem;
+    border-radius: 10px;
+    font-size: 1rem;
+    transition: border-color .2s;
+  }
+  .field input:focus { border-color: var(--primary-2); outline: none; box-shadow: var(--ring); }
+  .field .hint { font-size: .74rem; color: var(--muted); display: flex; gap: .35rem; align-items: center; }
+  .field .hint svg.ic { width: 13px; height: 13px; color: var(--accent); }
+  .btn-primary {
+    background: var(--me-bubble);
+    border: none; color: #fff;
+    padding: .8rem; border-radius: 10px;
+    font-weight: 600; font-size: 1rem;
+    display: flex; align-items: center; justify-content: center; gap: .5rem;
+    transition: transform .15s ease, filter .2s;
+  }
+  .btn-primary:hover { filter: brightness(1.12); }
+  .btn-primary:active { transform: scale(.97); }
+
+  #chat { display: none; flex: 1; flex-direction: column; min-height: 0; }
+
+  header {
+    display: flex; align-items: center; gap: .8rem;
+    padding: .65rem 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  header .room { display: flex; align-items: center; gap: .4rem; font-weight: 700; font-size: 1.02rem; }
+  header .room svg.ic { color: var(--primary-2); }
+  .badges { display: flex; gap: .45rem; margin-left: auto; align-items: center; flex-wrap: wrap; }
+  .badge {
+    display: inline-flex; align-items: center; gap: .35rem;
+    font-size: .72rem; font-weight: 600;
+    padding: .3rem .6rem; border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+    transition: color .3s, border-color .3s;
+  }
+  .badge svg.ic { width: 13px; height: 13px; }
+  .badge.ok { color: #34d399; border-color: rgba(52,211,153,.35); }
+  .badge.warn { color: #fbbf24; border-color: rgba(251,191,36,.35); }
+  .badge.err { color: #f87171; border-color: rgba(248,113,113,.35); }
+  .icon-btn {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 9px; padding: .42rem; display: none;
+    align-items: center; justify-content: center;
+    min-width: 38px; min-height: 38px;
+    transition: color .2s, border-color .2s, transform .15s;
+  }
+  .icon-btn:hover { color: var(--text); border-color: var(--primary-2); }
+  .icon-btn:active { transform: scale(.94); }
+
+  main { flex: 1; display: flex; min-height: 0; position: relative; }
+
+  #messages {
+    flex: 1; overflow-y: auto;
+
+    padding: 2.6rem 1.1rem 1rem;
+    display: flex; flex-direction: column; gap: .45rem;
+    scroll-behavior: smooth;
+  }
+  .msg {
+    max-width: min(72%, 620px);
+    padding: .55rem .9rem;
+    border-radius: var(--radius);
+    border-bottom-left-radius: 4px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    align-self: flex-start;
+    overflow-wrap: anywhere;
+    animation: msg-in .22s ease-out both;
+  }
+  @keyframes msg-in { from { opacity: 0; transform: translateY(8px); } }
+  .msg.mine {
+    background: var(--me-bubble);
+    border: none;
+    align-self: flex-end;
+    border-radius: var(--radius);
+    border-bottom-right-radius: 4px;
+  }
+  .msg .meta {
+    font-size: .72rem; color: var(--muted);
+    margin-bottom: .18rem;
+    display: flex; align-items: center; gap: .35rem;
+  }
+  .msg.mine .meta { color: rgba(255,255,255,.75); }
+  .msg .meta svg.ic { width: 11px; height: 11px; }
+  .msg.dm { border-color: rgba(167,139,250,.5); box-shadow: 0 0 14px rgba(124,58,237,.12); }
+  .msg.dm.mine { background: linear-gradient(135deg, #7c3aed, #4f46e5); }
+  .msg .body { font-size: .95rem; line-height: 1.5; white-space: pre-wrap; }
+  .msg .body.fail { color: var(--warn); font-size: .84rem; font-style: italic; }
+  .info {
+    align-self: center; color: var(--muted); font-size: .78rem;
+    padding: .15rem .8rem; animation: msg-in .25s ease-out both;
+  }
+
+  #sidebar {
+    width: 220px; flex: none;
+    border-left: 1px solid var(--border);
+    padding: 1rem .9rem;
+    overflow-y: auto;
+    display: flex; flex-direction: column; gap: .9rem;
+  }
+  #sidebar h2 {
+    font-size: .72rem; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted); display: flex; align-items: center; gap: .4rem;
+  }
+  #userlist { list-style: none; display: flex; flex-direction: column; gap: .15rem; }
+  #userlist button {
+    width: 100%; text-align: left;
+    display: flex; align-items: center; gap: .55rem;
+    background: none; border: 1px solid transparent; color: var(--text);
+    padding: .5rem .6rem; border-radius: 10px; font-size: .9rem;
+    min-height: 40px;
+    transition: background .2s, border-color .2s;
+  }
+  #userlist button:hover { background: var(--surface-2); border-color: var(--border); }
+  #userlist .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+                   box-shadow: 0 0 8px rgba(16,185,129,.8); flex: none; }
+  #userlist .you { color: var(--muted); font-size: .74rem; margin-left: auto; }
+  #sidebar .privacy {
+    margin-top: auto; font-size: .72rem; color: var(--muted); line-height: 1.5;
+    border-top: 1px solid var(--border); padding-top: .8rem;
+  }
+
+  footer { border-top: 1px solid var(--border); padding: .6rem 1rem .75rem; }
+  #typing {
+    height: 1.15rem; font-size: .75rem; color: var(--muted);
+    display: flex; align-items: center; gap: .45rem;
+    opacity: 0; transition: opacity .25s;
+  }
+  #typing.show { opacity: 1; }
+  #typing .dots { display: inline-flex; gap: 3px; }
+  #typing .dots i {
+    width: 4px; height: 4px; border-radius: 50%; background: var(--muted);
+    animation: bounce 1.2s infinite;
+  }
+  #typing .dots i:nth-child(2) { animation-delay: .15s; }
+  #typing .dots i:nth-child(3) { animation-delay: .3s; }
+  @keyframes bounce { 0%,60%,100% { transform: none; } 30% { transform: translateY(-4px); } }
+
+  #dmchip {
+    display: none; align-items: center; gap: .5rem;
+    font-size: .78rem; color: #c4b5fd;
+    background: rgba(124,58,237,.15);
+    border: 1px solid rgba(167,139,250,.4);
+    border-radius: 999px; padding: .25rem .4rem .25rem .7rem;
+    margin-bottom: .45rem; width: fit-content;
+    animation: msg-in .2s ease-out both;
+  }
+  #dmchip button {
+    background: none; border: none; color: inherit;
+    display: flex; padding: .15rem; border-radius: 50%;
+  }
+  #dmchip button:hover { background: rgba(255,255,255,.12); }
+
+  .inputrow { display: flex; gap: .55rem; }
+  .inputrow input {
+    flex: 1;
+    background: rgba(0,0,0,.35);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: .75rem 1rem; border-radius: 12px; font-size: 1rem;
+    transition: border-color .2s;
+  }
+  .inputrow input:focus { border-color: var(--primary-2); outline: none; box-shadow: var(--ring); }
+  .inputrow button {
+    background: var(--me-bubble); border: none; color: #fff;
+    width: 48px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    transition: transform .15s, filter .2s;
+  }
+  .inputrow button:hover { filter: brightness(1.12); }
+  .inputrow button:active { transform: scale(.93); }
+
+  .msg { position: relative; }
+  .actions {
+    position: absolute; top: -36px; right: 0; z-index: 5;
+    display: none; gap: 2px; padding: 3px 5px;
+    background: rgba(13,16,28,.96);
+    border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  }
+  .msg:hover .actions, .msg.selected .actions { display: flex; }
+  .actions button {
+    background: none; border: none; color: var(--muted);
+    font-size: .95rem; line-height: 1; padding: 4px 6px; border-radius: 7px;
+  }
+  .actions button:hover { background: var(--surface-2); color: var(--text); }
+  .reacts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+  .reacts button {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: .78rem; padding: 2px 8px;
+    background: rgba(0,0,0,.28); color: var(--text);
+    border: 1px solid var(--border); border-radius: 999px;
+  }
+  .reacts button.mine { border-color: var(--primary-2); background: rgba(99,102,241,.3); }
+  .msg .quote {
+    border-left: 3px solid var(--primary-2);
+    background: rgba(0,0,0,.22); border-radius: 4px;
+    padding: 3px 8px; margin-bottom: 5px;
+    font-size: .78rem; color: var(--muted);
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .msg.mine .quote { border-left-color: rgba(255,255,255,.6); color: rgba(255,255,255,.8);
+                     background: rgba(0,0,0,.18); }
+  .msg.deleted .body { color: var(--muted); font-style: italic; font-size: .84rem; }
+  .body a { color: #93c5fd; }
+  .msg.mine .body a { color: #dbeafe; }
+  .body code {
+    background: rgba(0,0,0,.35); border: 1px solid var(--border);
+    border-radius: 5px; padding: 1px 5px;
+    font-family: ui-monospace, "Cascadia Code", Menlo, monospace; font-size: .85em;
+  }
+  .edited-tag { font-size: .68rem; opacity: .75; }
+  .icon-btn.always { display: inline-flex; }
+  .icon-btn.on { color: #34d399; border-color: rgba(52,211,153,.4); }
+  .footchip {
+    display: none; align-items: center; gap: .5rem;
+    font-size: .78rem; color: var(--muted);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 999px; padding: .25rem .4rem .25rem .7rem;
+    margin-bottom: .45rem; width: fit-content; max-width: 100%;
+    animation: msg-in .2s ease-out both;
+  }
+  .footchip .prev { max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .footchip button {
+    background: none; border: none; color: inherit;
+    display: flex; padding: .15rem; border-radius: 50%;
+  }
+  .footchip button:hover { background: rgba(255,255,255,.12); }
+
+  @keyframes rise { from { opacity: 0; transform: translateY(14px); } }
+  @keyframes msg-in-l { from { opacity: 0; transform: translateX(-16px) scale(.96); } }
+  @keyframes msg-in-r { from { opacity: 0; transform: translateX(16px) scale(.96); } }
+  @keyframes pop { from { opacity: 0; transform: scale(.4); } }
+  @keyframes actions-in { from { opacity: 0; transform: translateY(5px) scale(.94); } }
+  @keyframes float { 50% { transform: translateY(-4px) rotate(-4deg); } }
+  @keyframes shine { 0%, 55% { transform: translateX(-110%); } 100% { transform: translateX(110%); } }
+  @keyframes blink { 50% { opacity: .5; } }
+  @keyframes sweep { to { background-position: 200% 0; } }
+  @keyframes dot-pulse { 50% { transform: scale(1.3); } }
+
+  #login > * { animation: rise .45s cubic-bezier(.2,.9,.3,1.2) both; }
+  #login > *:nth-child(2) { animation-delay: .06s; }
+  #login > *:nth-child(3) { animation-delay: .12s; }
+  #login > *:nth-child(4) { animation-delay: .18s; }
+  #login > *:nth-child(5) { animation-delay: .24s; }
+  #login > *:nth-child(6) { animation-delay: .3s; }
+  #login > *:nth-child(7) { animation-delay: .36s; }
+  #login .logo svg { animation: float 3.6s ease-in-out infinite; }
+  .btn-primary { position: relative; overflow: hidden; }
+  .btn-primary::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(115deg, transparent 35%, rgba(255,255,255,.22) 50%, transparent 65%);
+    transform: translateX(-110%);
+    animation: shine 3.2s ease-in-out infinite;
+  }
+
+  .msg { animation: msg-in-l .28s cubic-bezier(.2,.9,.3,1.15) both;
+         transition: transform .18s ease, box-shadow .18s ease; }
+  .msg:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0,0,0,.3); }
+  .msg.mine { animation-name: msg-in-r; }
+
+  .msg:hover .actions, .msg.selected .actions { animation: actions-in .16s ease-out both; }
+  .actions button { transition: transform .12s ease, background .15s, color .15s; }
+  .actions button:hover { transform: scale(1.2); }
+  .reacts button { animation: pop .22s cubic-bezier(.3,1.5,.5,1) both;
+                   transition: transform .15s ease, border-color .2s, background .2s; }
+  .reacts button:hover { transform: scale(1.1); }
+
+  header { position: relative; }
+  header::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgba(99,102,241,.65),
+                                rgba(37,99,235,.4), transparent);
+    background-size: 200% 100%;
+    animation: sweep 7s linear infinite;
+  }
+  .badge.ok svg.ic { animation: pop .35s cubic-bezier(.3,1.5,.5,1) both; }
+  #connBadge.err { animation: blink 1.1s ease-in-out infinite; }
+
+  #userlist li { animation: rise .3s ease-out both;
+                 animation-delay: calc(var(--i, 0) * 45ms); }
+  #userlist .dot { animation: dot-pulse 2.6s ease-in-out infinite; }
+
+  .inputrow button svg { transition: transform .2s cubic-bezier(.3,1.4,.5,1); }
+  .inputrow button:hover svg { transform: rotate(-20deg) translate(1px, -1px); }
+
+  #messages, #sidebar { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.15) transparent; }
+  #messages::-webkit-scrollbar, #sidebar::-webkit-scrollbar { width: 8px; }
+  #messages::-webkit-scrollbar-thumb, #sidebar::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.13); border-radius: 999px; }
+  #messages::-webkit-scrollbar-thumb:hover, #sidebar::-webkit-scrollbar-thumb:hover {
+    background: rgba(255,255,255,.25); }
+
+  @media (max-width: 700px) {
+    .icon-btn { display: inline-flex; }
+    #sidebar {
+      position: absolute; top: 0; right: 0; bottom: 0; z-index: 20;
+      background: rgba(10,13,22,.92);
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      transform: translateX(100%);
+      transition: transform .28s cubic-bezier(.2,.8,.3,1);
+      box-shadow: -20px 0 50px rgba(0,0,0,.5);
+    }
+    #sidebar.open { transform: none; }
+    .msg { max-width: 86%; }
+    .badge .lbl { display: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    #messages { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+<div class="aurora" aria-hidden="true"><i class="blob"></i></div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <g id="i-lock"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></g>
+    <g id="i-unlock"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></g>
+    <g id="i-shield"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></g>
+    <g id="i-shield-ok"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></g>
+    <g id="i-send"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></g>
+    <g id="i-hash"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></g>
+    <g id="i-users"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></g>
+    <g id="i-x"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></g>
+    <g id="i-wifi"><path d="M5 13a10 10 0 0 1 14 0"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></g>
+    <g id="i-msg"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></g>
+    <g id="i-bell"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></g>
+    <g id="i-reply"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></g>
+    <g id="i-pencil"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></g>
+    <g id="i-trash"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></g>
+  </defs>
+</svg>
+
+<section id="login" class="glass" aria-label="Belépés">
+  <div class="logo">
+    <svg class="ic" viewBox="0 0 24 24" style="color:#6366f1"><use href="#i-msg"/></svg>
+    <h1>Privát Csevegő</h1>
+  </div>
+  <p class="sub">Az első belépés egyben regisztráció: a beceneved a jelszavaddal védett lesz.</p>
+
+  <div class="field">
+    <label for="nick">Becenév</label>
+    <input id="nick" maxlength="24" placeholder="pl. Anna" autocomplete="username" autofocus>
+  </div>
+  <div class="field">
+    <label for="accpass">Fiókjelszó</label>
+    <input id="accpass" type="password" maxlength="64" placeholder="••••••••" autocomplete="current-password">
+    <span class="hint">
+      <svg class="ic" viewBox="0 0 24 24"><use href="#i-shield-ok"/></svg>
+      Ha a becenév még szabad, ezzel regisztrálod — utána csak te használhatod.
+    </span>
+  </div>
+  <div class="field">
+    <label for="room">Szoba</label>
+    <input id="room" maxlength="32" placeholder="kozos" autocomplete="off">
+    <span class="hint">Bármilyen nevet írhatsz — ha nem létezik, létrejön.</span>
+  </div>
+  <div class="field">
+    <label for="pass">Szobajelszó <span style="opacity:.6">(nem kötelező)</span></label>
+    <input id="pass" type="password" maxlength="64" placeholder="••••••••" autocomplete="off">
+    <span class="hint" id="passHint">
+      <svg class="ic" viewBox="0 0 24 24"><use href="#i-lock"/></svg>
+      Ha megadod, az üzenetek végpontok közt titkosítva utaznak — a szerver sem látja.
+    </span>
+  </div>
+  <button id="joinBtn" class="btn-primary">
+    Belépés
+    <svg class="ic" viewBox="0 0 24 24"><use href="#i-send"/></svg>
+  </button>
+</section>
+
+<div id="chat">
+  <header class="glass">
+    <span class="room">
+      <svg class="ic" viewBox="0 0 24 24"><use href="#i-hash"/></svg>
+      <span id="roomName">szoba</span>
+    </span>
+    <div class="badges">
+      <span class="badge" id="e2eeBadge">
+        <svg class="ic" viewBox="0 0 24 24"><use href="#i-unlock"/></svg>
+        <span class="lbl">nincs titkosítás</span>
+      </span>
+      <span class="badge" id="vpnBadge" title="VPN-ellenőrzés folyamatban…">
+        <svg class="ic" viewBox="0 0 24 24"><use href="#i-shield"/></svg>
+        <span class="lbl">VPN?</span>
+      </span>
+      <span class="badge" id="connBadge">
+        <svg class="ic" viewBox="0 0 24 24"><use href="#i-wifi"/></svg>
+        <span class="lbl">kapcsolódás…</span>
+      </span>
+    </div>
+    <button class="icon-btn always" id="notifBtn" aria-label="Asztali értesítések"
+            title="Asztali értesítések be/ki">
+      <svg class="ic" viewBox="0 0 24 24"><use href="#i-bell"/></svg>
+    </button>
+    <button class="icon-btn" id="usersBtn" aria-label="Online felhasználók">
+      <svg class="ic" viewBox="0 0 24 24"><use href="#i-users"/></svg>
+    </button>
+  </header>
+
+  <main>
+    <div id="messages" aria-live="polite"></div>
+    <aside id="sidebar" class="glass" aria-label="Online felhasználók">
+      <h2>
+        <svg class="ic" viewBox="0 0 24 24"><use href="#i-users"/></svg>
+        Online — <span id="userCount">0</span>
+      </h2>
+      <ul id="userlist"></ul>
+      <p class="privacy">
+        A privát üzenethez koppints egy névre — a DM-ek sosem kerülnek lemezre.<br>
+        A szobák előzménye helyben, a szerver <b>chat_data/</b> mappájában marad.
+      </p>
+    </aside>
+  </main>
+
+  <footer>
+    <div id="typing" aria-hidden="true">
+      <span class="dots"><i></i><i></i><i></i></span>
+      <span id="typingText"></span>
+    </div>
+    <div id="dmchip">
+      <svg class="ic" viewBox="0 0 24 24" style="width:13px;height:13px"><use href="#i-lock"/></svg>
+      Privát üzenet: <b id="dmTarget"></b>
+      <button id="dmCancel" aria-label="Privát mód kikapcsolása">
+        <svg class="ic" viewBox="0 0 24 24" style="width:13px;height:13px"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div id="replychip" class="footchip">
+      <svg class="ic" viewBox="0 0 24 24" style="width:13px;height:13px"><use href="#i-reply"/></svg>
+      Válasz: <span class="prev" id="replyPrev"></span>
+      <button id="replyCancel" aria-label="Válasz elvetése">
+        <svg class="ic" viewBox="0 0 24 24" style="width:13px;height:13px"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div id="editchip" class="footchip">
+      <svg class="ic" viewBox="0 0 24 24" style="width:13px;height:13px"><use href="#i-pencil"/></svg>
+      Szerkesztés: <span class="prev" id="editPrev"></span>
+      <button id="editCancel" aria-label="Szerkesztés elvetése">
+        <svg class="ic" viewBox="0 0 24 24" style="width:13px;height:13px"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div class="inputrow">
+      <input id="input" maxlength="4000" placeholder="Írj üzenetet…" autocomplete="off"
+             aria-label="Üzenet">
+      <button id="sendBtn" aria-label="Küldés">
+        <svg class="ic" viewBox="0 0 24 24"><use href="#i-send"/></svg>
+      </button>
+    </div>
+  </footer>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+let ws = null;
+let myNick = null;
+let myPass = null;
+let roomName = null;
+let cryptoKey = null;
+let dmTo = null;
+let replyTo = null;
+let editingId = null;
+let notifOn = false;
+const msgStore = new Map();
+let unread = 0;
+let typingTimer = null;
+let lastTypingSent = 0;
+let reconnectDelay = 2000;
+let joined = false;
+
+const enc = new TextEncoder(), dec = new TextDecoder();
+
+async function deriveKey(password, room) {
+  const material = await crypto.subtle.importKey(
+    "raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt: enc.encode("privat-csevego:" + room),
+      iterations: 200000, hash: "SHA-256" },
+    material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+
+async function encryptText(text) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, cryptoKey, enc.encode(text));
+  const buf = new Uint8Array(iv.length + ct.byteLength);
+  buf.set(iv); buf.set(new Uint8Array(ct), iv.length);
+  return btoa(String.fromCharCode(...buf));
+}
+
+async function decryptText(b64) {
+  const buf = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const pt = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: buf.slice(0, 12) }, cryptoKey, buf.slice(12));
+  return dec.decode(pt);
+}
+
+async function join() {
+  const nick = $("nick").value.trim();
+  if (!nick) { $("nick").focus(); return; }
+  const accpass = $("accpass").value;
+  if (!accpass) { $("accpass").focus(); return; }
+  roomName = $("room").value.trim() || "kozos";
+  const pass = $("pass").value;
+
+  if (pass) {
+    if (!window.isSecureContext || !crypto.subtle) {
+      alert("A végpontok közötti titkosításhoz HTTPS (vagy localhost) kell.\n" +
+            "Titkosítás nélkül lépsz be — vagy indítsd a szervert HTTPS-sel (make_cert.sh).");
+    } else {
+      cryptoKey = await deriveKey(pass, roomName);
+    }
+  }
+
+  myPass = accpass;
+  connect(nick);
+}
+
+function enterChat(msg) {
+  $("login").style.display = "none";
+  $("chat").style.display = "flex";
+  $("roomName").textContent = roomName;
+  setE2EEBadge();
+  checkVPN();
+
+  try {
+    localStorage.setItem("csevego_nick", myNick);
+    localStorage.setItem("csevego_room", roomName);
+  } catch {}
+  if (msg.registered)
+    addInfo(`Fiók létrehozva: a(z) ${myNick} becenév mostantól a jelszavaddal védett.`);
+}
+
+function setE2EEBadge() {
+  const b = $("e2eeBadge");
+  if (cryptoKey) {
+    b.className = "badge ok";
+    b.innerHTML = '<svg class="ic" viewBox="0 0 24 24"><use href="#i-lock"/></svg>' +
+                  '<span class="lbl">E2EE aktív</span>';
+    b.title = "Végpontok közötti titkosítás: a szerver csak titkosított szöveget lát.";
+  } else {
+    b.className = "badge warn";
+    b.title = "Nincs szobajelszó — az üzenetek titkosítás nélkül utaznak a szerverig.";
+  }
+}
+
+function connect(nick) {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/`);
+
+  ws.onopen = () => {
+    reconnectDelay = 2000;
+    setConn(true);
+    ws.send(JSON.stringify({ type: "join", nick, room: roomName, password: myPass }));
+  };
+
+  ws.onmessage = async e => {
+    const msg = JSON.parse(e.data);
+    switch (msg.type) {
+      case "welcome":
+        myNick = msg.nick;
+        if (!joined) {
+          joined = true;
+          enterChat(msg);
+          $("messages").innerHTML = "";
+          for (const m of msg.history) await addMessage(m);
+          addInfo(`Beléptél mint ${myNick}`);
+          $("input").focus();
+        }
+        break;
+      case "join_error":
+        if (!joined) alert(msg.text);
+        break;
+      case "message": notify(msg, await addMessage(msg)); break;
+      case "dm": notify(msg, await addDM(msg)); break;
+      case "react": renderReactions(msg.id, msg.reactions || {}); break;
+      case "edit": await applyEdit(msg); break;
+      case "delete": applyDelete(msg.id); break;
+      case "info": addInfo(`${msg.text} · ${msg.time}`); break;
+      case "users": renderUsers(msg.users); break;
+      case "typing": showTyping(msg.nick); break;
+    }
+  };
+
+  ws.onclose = ev => {
+    setConn(false);
+
+    if (ev.code === 4004) { if (joined) addInfo("A belépés érvénytelen lett."); return; }
+
+    const finalCodes = {
+      4001: "Az üzemeltető kizárt a szobából.",
+      4002: "Az üzemeltető kitiltott a szerverről.",
+      4009: "A kapcsolat üzenetáradat miatt megszakadt.",
+    };
+    if (finalCodes[ev.code]) { addInfo(finalCodes[ev.code]); return; }
+    if (!joined) { alert("Nem sikerült kapcsolódni a szerverhez."); return; }
+    if (joined) addInfo(`Kapcsolat megszakadt — újracsatlakozás ${reconnectDelay / 1000} mp múlva…`);
+    setTimeout(() => connect(myNick || nick), reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 1.5, 15000);
+  };
+}
+
+function setConn(online) {
+  const b = $("connBadge");
+  b.className = "badge " + (online ? "ok" : "err");
+  b.querySelector(".lbl").textContent = online ? "kapcsolódva" : "nincs kapcsolat";
+}
+
+async function checkVPN() {
+  const b = $("vpnBadge");
+  try {
+    const r = await fetch("/api/vpn");
+    const d = await r.json();
+    if (d.vpn) {
+      b.className = "badge ok";
+      b.innerHTML = '<svg class="ic" viewBox="0 0 24 24"><use href="#i-shield-ok"/></svg>' +
+                    `<span class="lbl">${d.provider} VPN</span>`;
+      b.title = `A szerver forgalma VPN mögött van (${d.ip} · ${d.country})`;
+    } else if (d.vpn === false) {
+      b.className = "badge warn";
+      b.querySelector(".lbl").textContent = "nincs VPN";
+      b.title = `A szerver kimenő IP-je védtelen: ${d.ip} (${d.country} · ${d.organization}).\n` +
+                "Tipp: indíts Mullvad/Proton VPN-t a szerveren, és a jelvény zöldre vált.";
+    } else {
+      b.querySelector(".lbl").textContent = "VPN: n/a";
+      b.title = "A VPN-ellenőrzés nem érhető el (nincs internet?)";
+    }
+  } catch {
+    b.querySelector(".lbl").textContent = "VPN: n/a";
+  }
+  setTimeout(checkVPN, 90000);
+}
+
+function nickColor(n) {
+
+  let h = 0;
+  for (const c of n) h = Math.imul(h ^ c.codePointAt(0), 2654435761) >>> 0;
+  return `hsl(${h % 360} 65% 72%)`;
+}
+
+const URL_RE = /https?:\/\/[^\s<>"']+/g;
+
+function richStyled(target, text) {
+  const re = /\*\*([^*]+)\*\*|\*([^*]+)\*/g;
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    if (m.index > last) target.append(text.slice(last, m.index));
+    const el = document.createElement(m[1] !== undefined ? "b" : "i");
+    el.textContent = m[1] !== undefined ? m[1] : m[2];
+    target.append(el);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) target.append(text.slice(last));
+}
+
+function richInline(target, text) {
+  let last = 0;
+  for (const m of text.matchAll(URL_RE)) {
+    if (m.index > last) richStyled(target, text.slice(last, m.index));
+    const a = document.createElement("a");
+    a.href = m[0]; a.textContent = m[0];
+    a.target = "_blank"; a.rel = "noopener noreferrer";
+    target.append(a);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) richStyled(target, text.slice(last));
+}
+
+function renderRich(text) {
+  const frag = document.createDocumentFragment();
+  for (const p of text.split(/(`[^`]+`)/)) {
+    if (p.length > 2 && p.startsWith("`") && p.endsWith("`")) {
+      const code = document.createElement("code");
+      code.textContent = p.slice(1, -1);
+      frag.append(code);
+    } else if (p) {
+      richInline(frag, p);
+    }
+  }
+  return frag;
+}
+
+/* ================= Üzenetek megjelenítése ================= */
+const REACTION_SET = ["👍", "❤️", "😂", "🎉", "😮"];
+
+function sendJSON(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+async function renderText(m) {
+  if (!m.enc) return { text: m.text, fail: false };
+  if (!cryptoKey) return { text: "Titkosított üzenet — jelszó nélkül nem olvasható.", fail: true };
+  try { return { text: await decryptText(m.text), fail: false }; }
+  catch { return { text: "Nem sikerült visszafejteni (eltérő jelszó?).", fail: true }; }
+}
+
+async function addMessage(m) {
+  const { text, fail } = await renderText(m);
+  if (m.id) msgStore.set(m.id, { nick: m.nick, text: m.deleted ? "" : text });
+  appendBubble(m.nick, text, m.time, {
+    mine: m.nick === myNick, enc: m.enc, fail,
+    id: m.id, replyToId: m.reply_to, edited: m.edited,
+    deleted: m.deleted, reactions: m.reactions,
+  });
+  return text;
+}
+
+async function addDM(m) {
+  const { text, fail } = await renderText(m);
+  const mine = m.from === myNick;
+  appendBubble(mine ? `Te → ${m.to}` : `${m.from} → neked`, text, m.time,
+               { mine, enc: m.enc, fail, dm: true });
+  return text;
+}
+
+function iconBtnEl(icon, title) {
+  const b = document.createElement("button");
+  b.title = title;
+  b.innerHTML = `<svg class="ic" viewBox="0 0 24 24" style="width:15px;height:15px"><use href="#${icon}"/></svg>`;
+  return b;
+}
+
+function hideActions() {
+  for (const el of document.querySelectorAll(".msg.selected"))
+    el.classList.remove("selected");
+}
+
+function buildActions(id, mine) {
+  const bar = document.createElement("div");
+  bar.className = "actions";
+  for (const e of REACTION_SET) {
+    const b = document.createElement("button");
+    b.textContent = e;
+    b.title = "Reakció: " + e;
+    b.onclick = () => { sendJSON({ type: "react", id, emoji: e }); hideActions(); };
+    bar.appendChild(b);
+  }
+  const reply = iconBtnEl("i-reply", "Válasz erre az üzenetre");
+  reply.onclick = () => { startReply(id); hideActions(); };
+  bar.appendChild(reply);
+  if (mine) {
+    const edit = iconBtnEl("i-pencil", "Szerkesztés");
+    edit.onclick = () => { startEdit(id); hideActions(); };
+    const del = iconBtnEl("i-trash", "Törlés");
+    del.onclick = () => {
+      if (confirm("Biztosan törlöd az üzenetet?")) sendJSON({ type: "delete", id });
+      hideActions();
+    };
+    bar.append(edit, del);
+  }
+  return bar;
+}
+
+function appendBubble(who, text, time, o) {
+  const div = document.createElement("div");
+  div.className = "msg" + (o.mine ? " mine" : "") + (o.dm ? " dm" : "")
+                + (o.deleted ? " deleted" : "");
+  if (o.id) div.dataset.id = o.id;
+
+  if (o.replyToId) {
+    const q = document.createElement("div");
+    q.className = "quote";
+    const orig = msgStore.get(o.replyToId);
+    q.textContent = orig ? `${orig.nick}: ${orig.text || "(törölt üzenet)"}`
+                         : "Az eredeti üzenet már nem elérhető.";
+    div.appendChild(q);
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  if (o.enc) meta.innerHTML = '<svg class="ic" viewBox="0 0 24 24"><use href="#i-lock"/></svg>';
+  const name = document.createElement("span");
+  name.textContent = who;
+  name.style.fontWeight = "600";
+  if (!o.mine && !o.dm) name.style.color = nickColor(who);
+  meta.append(name, ` · ${time}`);
+  if (o.edited) {
+    const tag = document.createElement("span");
+    tag.className = "edited-tag";
+    tag.textContent = "(szerkesztve)";
+    meta.append(" ", tag);
+  }
+
+  const body = document.createElement("div");
+  body.className = "body" + (o.fail ? " fail" : "");
+  if (o.deleted) body.textContent = "Ezt az üzenetet a küldője törölte.";
+  else if (o.fail) body.textContent = text;
+  else body.append(renderRich(text));
+
+  div.append(meta, body);
+
+  if (o.id && !o.dm && !o.deleted) {
+    div.appendChild(buildActions(o.id, o.mine));
+    const reacts = document.createElement("div");
+    reacts.className = "reacts";
+    div.appendChild(reacts);
+    // Koppintásra is előjön az akciósáv (érintőkijelzőn nincs hover)
+    body.addEventListener("click", () => {
+      const was = div.classList.contains("selected");
+      hideActions();
+      div.classList.toggle("selected", !was);
+    });
+  }
+
+  appendAndScroll(div);
+  if (o.id && o.reactions) renderReactions(o.id, o.reactions);
+}
+
+function renderReactions(id, reactions) {
+  const box = document.querySelector(`.msg[data-id="${id}"] .reacts`);
+  if (!box) return;
+  box.innerHTML = "";
+  for (const [emoji, users] of Object.entries(reactions)) {
+    if (!users.length) continue;
+    const b = document.createElement("button");
+    if (users.includes(myNick)) b.className = "mine";
+    b.textContent = `${emoji} ${users.length}`;
+    b.title = users.join(", ");
+    b.onclick = () => sendJSON({ type: "react", id, emoji });
+    box.appendChild(b);
+  }
+}
+
+async function applyEdit(m) {
+  const { text, fail } = await renderText(m);
+  const stored = msgStore.get(m.id);
+  if (stored) stored.text = text;
+  const div = document.querySelector(`.msg[data-id="${m.id}"]`);
+  if (!div) return;
+  const body = div.querySelector(".body");
+  body.className = "body" + (fail ? " fail" : "");
+  body.innerHTML = "";
+  if (fail) body.textContent = text;
+  else body.append(renderRich(text));
+  const meta = div.querySelector(".meta");
+  if (!meta.querySelector(".edited-tag")) {
+    const tag = document.createElement("span");
+    tag.className = "edited-tag";
+    tag.textContent = "(szerkesztve)";
+    meta.append(" ", tag);
+  }
+}
+
+function applyDelete(id) {
+  const stored = msgStore.get(id);
+  if (stored) stored.text = "";
+  if (editingId === id) cancelEdit();
+  if (replyTo === id) cancelReply();
+  const div = document.querySelector(`.msg[data-id="${id}"]`);
+  if (!div) return;
+  div.classList.add("deleted");
+  div.classList.remove("selected");
+  div.querySelector(".actions")?.remove();
+  div.querySelector(".reacts")?.remove();
+  const body = div.querySelector(".body");
+  body.className = "body";
+  body.textContent = "Ezt az üzenetet a küldője törölte.";
+}
+
+/* ================= Válasz és szerkesztés ================= */
+function startReply(id) {
+  const s = msgStore.get(id);
+  if (!s) return;
+  cancelEdit();
+  replyTo = id;
+  $("replyPrev").textContent = `${s.nick}: ${s.text}`;
+  $("replychip").style.display = "flex";
+  $("input").focus();
+}
+
+function cancelReply() {
+  replyTo = null;
+  $("replychip").style.display = "none";
+}
+
+function startEdit(id) {
+  const s = msgStore.get(id);
+  if (!s) return;
+  cancelReply();
+  setDM(null);
+  editingId = id;
+  $("editPrev").textContent = s.text;
+  $("editchip").style.display = "flex";
+  $("input").value = s.text;
+  $("input").focus();
+}
+
+function cancelEdit() {
+  if (editingId) $("input").value = "";
+  editingId = null;
+  $("editchip").style.display = "none";
+}
+
+function addInfo(text) {
+  const div = document.createElement("div");
+  div.className = "info";
+  div.textContent = text;
+  appendAndScroll(div);
+}
+
+function appendAndScroll(el) {
+  const box = $("messages");
+  const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  box.appendChild(el);
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+/* ================= Felhasználólista / DM ================= */
+function renderUsers(users) {
+  $("userCount").textContent = users.length;
+  const ul = $("userlist");
+  ul.innerHTML = "";
+  let idx = 0;
+  for (const u of users) {
+    const li = document.createElement("li");
+    li.style.setProperty("--i", idx++);
+    const btn = document.createElement("button");
+    btn.innerHTML = '<span class="dot"></span>';
+    const dot = btn.querySelector(".dot");
+    dot.style.background = nickColor(u);
+    dot.style.boxShadow = `0 0 8px ${nickColor(u)}`;
+    btn.append(u);
+    if (u === myNick) {
+      const me = document.createElement("span");
+      me.className = "you"; me.textContent = "te";
+      btn.append(me);
+      btn.disabled = true;
+    } else {
+      btn.title = `Privát üzenet neki: ${u}`;
+      btn.onclick = () => { setDM(u); $("sidebar").classList.remove("open"); };
+    }
+    li.appendChild(btn);
+    ul.appendChild(li);
+  }
+  if (dmTo && !users.includes(dmTo)) setDM(null);
+}
+
+function setDM(user) {
+  dmTo = user;
+  if (user) { cancelReply(); cancelEdit(); }
+  $("dmchip").style.display = user ? "flex" : "none";
+  if (user) { $("dmTarget").textContent = user; $("input").focus(); }
+}
+
+/* ================= Gépelésjelzés ================= */
+function showTyping(nick) {
+  $("typingText").textContent = `${nick} éppen ír…`;
+  $("typing").classList.add("show");
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(() => $("typing").classList.remove("show"), 2500);
+}
+
+/* ================= Értesítések ================= */
+function setNotifBtn() {
+  const on = notifOn && "Notification" in window && Notification.permission === "granted";
+  $("notifBtn").classList.toggle("on", on);
+  $("notifBtn").title = on ? "Asztali értesítések: BE (kattints a kikapcsoláshoz)"
+                           : "Asztali értesítések: KI (kattints a bekapcsoláshoz)";
+}
+
+async function toggleNotif() {
+  if (!("Notification" in window)) {
+    alert("Ez a böngésző nem támogatja az asztali értesítéseket.");
+    return;
+  }
+  if (!notifOn) {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") {
+      alert("Az értesítések le vannak tiltva a böngészőben ehhez az oldalhoz.");
+      return;
+    }
+    notifOn = true;
+  } else {
+    notifOn = false;
+  }
+  try { localStorage.setItem("csevego_notif", notifOn ? "1" : "0"); } catch {}
+  setNotifBtn();
+}
+
+function notify(m, shown) {
+  const senderIsMe = (m.nick || m.from) === myNick;
+  if (senderIsMe || !document.hidden) return;
+  unread++;
+  document.title = `(${unread}) Privát Csevegő`;
+  if (notifOn && "Notification" in window && Notification.permission === "granted") {
+    try {
+      new Notification(m.type === "dm" ? `${m.from} (privát)` : m.nick, {
+        body: String(shown || "").slice(0, 120),
+        icon: "/icon-192.png",
+        tag: "csevego",
+      });
+    } catch {}
+  }
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "sine"; o.frequency.value = 660;
+    g.gain.setValueAtTime(.08, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(.001, ctx.currentTime + .25);
+    o.connect(g).connect(ctx.destination);
+    o.start(); o.stop(ctx.currentTime + .25);
+  } catch {}
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) { unread = 0; document.title = "Privát Csevegő"; }
+});
+
+/* ================= Küldés ================= */
+async function send() {
+  const input = $("input");
+  const text = input.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  let payload = text, encFlag = false;
+  if (cryptoKey) { payload = await encryptText(text); encFlag = true; }
+  if (editingId) {
+    sendJSON({ type: "edit", id: editingId, text: payload, enc: encFlag });
+    editingId = null;
+    $("editchip").style.display = "none";
+  } else if (dmTo) {
+    sendJSON({ type: "dm", to: dmTo, text: payload, enc: encFlag });
+  } else {
+    const out = { type: "message", text: payload, enc: encFlag };
+    if (replyTo) out.reply_to = replyTo;
+    sendJSON(out);
+    cancelReply();
+  }
+  input.value = "";
+  input.focus();
+}
+
+/* ================= Események ================= */
+$("joinBtn").onclick = join;
+for (const id of ["nick", "accpass", "room", "pass"])
+  $(id).addEventListener("keydown", e => { if (e.key === "Enter") join(); });
+
+// Mentett becenév és szoba visszatöltése (a jelszót sosem tároljuk)
+try {
+  $("nick").value = localStorage.getItem("csevego_nick") || "";
+  $("room").value = localStorage.getItem("csevego_room") || "";
+  if ($("nick").value) $("accpass").focus();
+} catch {}
+
+$("sendBtn").onclick = send;
+$("input").addEventListener("keydown", e => {
+  if (e.key === "Enter") send();
+  else if (e.key === "Escape") { cancelEdit(); cancelReply(); setDM(null); }
+});
+$("input").addEventListener("input", () => {
+  const t = Date.now();
+  if (t - lastTypingSent > 1500 && ws && ws.readyState === WebSocket.OPEN) {
+    lastTypingSent = t;
+    ws.send(JSON.stringify({ type: "typing" }));
+  }
+});
+$("dmCancel").onclick = () => setDM(null);
+$("replyCancel").onclick = cancelReply;
+$("editCancel").onclick = cancelEdit;
+$("usersBtn").onclick = () => $("sidebar").classList.toggle("open");
+$("notifBtn").onclick = toggleNotif;
+
+// Értesítési beállítás visszatöltése
+try {
+  notifOn = localStorage.getItem("csevego_notif") === "1"
+            && "Notification" in window && Notification.permission === "granted";
+} catch {}
+setNotifBtn();
+
+/* ================= PWA ================= */
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+</script>
+</body>
+</html>

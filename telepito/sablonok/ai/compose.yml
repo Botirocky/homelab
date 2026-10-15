@@ -1,0 +1,113 @@
+# AI stack
+# ========
+#   ollama      – helyi modellek futtatása (a súlyok az ADAT_DIR/ai/ollama alatt)
+#   litellm     – átjáró a FELHŐS modellekhez (Claude, GPT, Gemini, …) saját kulccsal
+#   open-webui  – a közös felület: helyi és felhős modellek egy helyen
+#   searxng     – webkeresés, hogy a modellek friss információt is lássanak
+#   comfyui     – képgenerálás (csak akkor indul, ha bekapcsolod: AI_KEPGENERALAS)
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: park-ollama
+    restart: unless-stopped
+    volumes:
+      - ${AI_MODELL_DIR}:/root/.ollama
+    environment:
+      TZ: ${TZ}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+      OLLAMA_HOST: 0.0.0.0
+      # Egyszerre hány modell lehet a memóriában / hány kérés fusson párhuzamosan
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-2}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-2}
+    networks: [park]
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: park-litellm
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm.config.yaml:/app/config.yaml:ro
+    environment:
+      TZ: ${TZ}
+      LITELLM_MASTER_KEY: ${LITELLM_KULCS}
+      # Csak azok a szolgáltatók élnek, amelyekhez van kulcs a .env-ben.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    networks: [park]
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: park-searxng
+    restart: unless-stopped
+    volumes:
+      - ./searxng:/etc/searxng
+    environment:
+      TZ: ${TZ}
+      SEARXNG_BASE_URL: http://kereso.${BELSO_DOMAIN}/
+    networks: [park]
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: park-open-webui
+    restart: unless-stopped
+    depends_on: [ollama, litellm]
+    ports:
+      - "3000:8080"
+    volumes:
+      - ${ADAT_DIR}/ai/open-webui:/app/backend/data
+    environment:
+      TZ: ${TZ}
+      OLLAMA_BASE_URL: http://ollama:11434
+      # A felhős modellek a LiteLLM-en át jönnek (OpenAI-kompatibilis végpont).
+      OPENAI_API_BASE_URLS: http://litellm:4000/v1
+      OPENAI_API_KEYS: ${LITELLM_KULCS}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET}
+      # Az első regisztráló lesz az admin; utána zárd le a regisztrációt.
+      ENABLE_SIGNUP: "true"
+      # Beszédfelismerés (hangüzenet -> szöveg) helyben, a konténerben:
+      WHISPER_MODEL: ${WHISPER_MODELL:-base}
+      # Webkeresés a válaszokhoz (SearXNG):
+      ENABLE_WEB_SEARCH: "true"
+      WEB_SEARCH_ENGINE: searxng
+      SEARXNG_QUERY_URL: http://searxng:8080/search?q=<query>
+      ENABLE_RAG_WEB_SEARCH: "true"
+      RAG_WEB_SEARCH_ENGINE: searxng
+      # Dokumentumokhoz (RAG) használt beágyazó modell – helyben fut:
+      RAG_EMBEDDING_ENGINE: ollama
+      RAG_EMBEDDING_MODEL: ${AI_BEAGYAZO:-nomic-embed-text}
+    # Kis gépen (Raspberry Pi) percekig indul. Az alap healthcheck ezt hibának
+    # látná, és az őrszem újraindítaná – ezért kap indulási türelmi időt.
+    healthcheck:
+      start_period: 10m
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    networks: [park]
+
+  comfyui:
+    image: ghcr.io/lecode-official/comfyui-docker:latest
+    container_name: park-comfyui
+    restart: unless-stopped
+    profiles: [kep]
+    ports:
+      - "8188:8188"
+    volumes:
+      - ${ADAT_DIR}/ai/comfyui/models:/opt/comfyui/models
+      - ${ADAT_DIR}/ai/comfyui/output:/opt/comfyui/output
+      - ${ADAT_DIR}/ai/comfyui/input:/opt/comfyui/input
+    environment:
+      TZ: ${TZ}
+    networks: [park]
+
+networks:
+  park:
+    external: true

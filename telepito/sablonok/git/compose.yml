@@ -1,0 +1,25 @@
+# Saját git szerver – ide költözhetnek a projektjeid, CI-vel együtt.
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:11
+    container_name: park-forgejo
+    restart: unless-stopped
+    ports:
+      - "3003:3000"
+      - "2222:22"
+    volumes:
+      - ${ADAT_DIR}/forgejo:/data
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      TZ: ${TZ}
+      USER_UID: ${PUID}
+      USER_GID: ${PGID}
+      FORGEJO__server__DOMAIN: git.${BELSO_DOMAIN}
+      FORGEJO__server__ROOT_URL: http://git.${BELSO_DOMAIN}/
+      FORGEJO__server__SSH_PORT: "2222"
+      FORGEJO__service__DISABLE_REGISTRATION: "false"
+    networks: [park]
+
+networks:
+  park:
+    external: true

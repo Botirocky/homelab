@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+PARK_DIR="${PARK_DIR:-/srv/szerverpark}"
+[[ -r /etc/szerverpark.conf ]] && source /etc/szerverpark.conf
+TAROLO_DIR="${TAROLO_DIR:-/srv/tarolok}"
+CEL_DIR="${ALLAPOT_DIR:-${PARK_DIR}/web/allapot}"
+CEL="${CEL_DIR}/allapot.json"
+GYORS="/run/park-allapot"
+mkdir -p "$CEL_DIR" "$GYORS"
+
+sugo() {
+    cat <<'SUGO'
+park-allapot – a szerver állapota egy kis JSON-fájlba (kijelzőknek, ESP32-nek).
+
+  park-allapot                 egyszer lefut, és megírja: /srv/szerverpark/web/allapot/allapot.json
+  park-allapot --kiir          ugyanez, de a JSON-t ki is írja
+  park-allapot --telepit       systemd időzítő (30 mp-enként)
+  park-allapot --eltavolit     az időzítő leszedése
+
+A Caddy a gép IP-jén szolgálja ki:  http://<szerver-ip>/allapot.json
+SUGO
+}
+
+friss_e() {
+    local f="$1" max="$2"
+    [[ -f "$f" ]] && (( $(date +%s) - $(stat -c %Y "$f") < max ))
+}
+
+cpu_szazalek() {
+    local a b
+    read -r _ a1 a2 a3 a4 a5 a6 a7 _ < /proc/stat
+    sleep 1
+    read -r _ b1 b2 b3 b4 b5 b6 b7 _ < /proc/stat
+    a=$((a1 + a2 + a3 + a4 + a5 + a6 + a7)); b=$((b1 + b2 + b3 + b4 + b5 + b6 + b7))
+    local ossz=$((b - a)) tetlen=$(( (b4 + b5) - (a4 + a5) ))
+    (( ossz > 0 )) && echo $(( (100 * (ossz - tetlen)) / ossz )) || echo 0
+}
+
+lemezek_json() {
+    local lat="" sor
+    df -P -B1 / "$TAROLO_DIR"/* 2>/dev/null | tail -n +2 | while read -r eszkoz ossz hasznalt szabad _ hely; do
+        [[ " $lat " == *" $eszkoz "* ]] && continue
+        lat="$lat $eszkoz"
+        (( ossz < 2 * 1024 * 1024 * 1024 )) && continue
+        nev="rendszer"; [[ "$hely" != "/" ]] && nev="$(basename "$hely")"
+        jq -nc --arg n "$nev" --argjson o "$ossz" --argjson h "$hasznalt" --argjson s "$szabad" \
+            '{nev: $n, szazalek: (if $o > 0 then ($h * 100 / $o | floor) else 0 end), szabad_gb: ($s / 1073741824 | . * 10 | floor / 10)}'
+    done | jq -sc '.[:4]'
+}
+
+kontenerek_json() {
+    local minta="^park-"
+    for c in ${ORZO_EXTRA:-}; do minta="${minta}|^${c}\$"; done
+    docker ps -a --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null | grep -E "^(${minta#^})" | \
+        jq -Rsc --arg m "$minta" '
+            split("\n") | map(select(length > 0) | split("|") | {n: .[0], s: .[1], st: .[2]})
+            | map(select(.n | test($m)))
+            | {ossz: length,
+               fut: map(select(.s == "running")) | length,
+               leallt: map(select(.s != "running") | .n | sub("^park-"; "")),
+               beteg: map(select(.st | test("unhealthy")) | .n | sub("^park-"; ""))}'
+}
+
+pihole_json() {
+    local f="${GYORS}/pihole.json"
+    if ! friss_e "$f" 60; then
+        local nev
+        nev="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -xE 'pihole|park-pihole' | head -1)"
+        if [[ -n "$nev" ]] && docker exec "$nev" pihole api stats/summary 2>/dev/null \
+            | jq -c '{lekerdezes: .queries.total, blokkolt: .queries.blocked,
+                      szazalek: (.queries.percent_blocked * 10 | floor / 10),
+                      lista: .gravity.domains_being_blocked}' >"${f}.uj" 2>/dev/null; then
+            mv "${f}.uj" "$f"
+        else
+            echo null >"$f"
+        fi
+    fi
+    cat "$f"
+}
+
+egeszseg_json() {
+    local f="${GYORS}/egeszseg.json"
+    if ! friss_e "$f" 120; then
+        if [[ -x /usr/local/bin/park-egeszseg ]]; then
+            /usr/local/bin/park-egeszseg --json 2>/dev/null | jq -c '{szint, allapot, gondok}' >"${f}.uj" 2>/dev/null \
+                && mv "${f}.uj" "$f" || echo null >"$f"
+        else
+            echo null >"$f"
+        fi
+    fi
+    cat "$f"
+}
+
+mentes_ido() {
+    local repo="${MENTES_CEL:-${PARK_DIR}/mentes/repo}" utolso
+    utolso="$(ls -t "${repo}/snapshots" 2>/dev/null | head -1)"
+    [[ -n "$utolso" ]] && stat -c %Y "${repo}/snapshots/${utolso}" || echo 0
+}
+
+tailscale_be() {
+    command -v tailscale >/dev/null || { echo false; return; }
+    tailscale status --json 2>/dev/null | jq -r '.BackendState == "Running"' 2>/dev/null || echo false
+}
+
+keszit() {
+    local cpu homer ram_ossz ram_szabad uptime terheles most
+    cpu="$(cpu_szazalek)"
+    homer="$(awk '{printf "%.1f", $1 / 1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0)"
+    ram_ossz="$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)"
+    ram_szabad="$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo)"
+    uptime="$(awk '{print int($1)}' /proc/uptime)"
+    terheles="$(awk '{print $1}' /proc/loadavg)"
+    most="$(date +%s)"
+
+    jq -n \
+        --arg gep "$(hostname -s)" \
+        --argjson ido "$most" \
+        --arg ora "$(date +%H:%M)" \
+        --arg datum "$(date +%m.%d.)" \
+        --argjson uptime "$uptime" \
+        --argjson cpu "$cpu" \
+        --argjson homer "$homer" \
+        --argjson terheles "$terheles" \
+        --argjson ram_ossz "$ram_ossz" \
+        --argjson ram_szabad "$ram_szabad" \
+        --argjson lemezek "$(lemezek_json)" \
+        --argjson kontenerek "$(kontenerek_json || echo null)" \
+        --argjson pihole "$(pihole_json)" \
+        --argjson egeszseg "$(egeszseg_json)" \
+        --argjson mentes "$(mentes_ido)" \
+        --argjson tailscale "$(tailscale_be)" \
+        '{gep: $gep, ido: $ido, ora: $ora, datum: $datum, uptime: $uptime,
+          cpu: $cpu, homerseklet: $homer, terheles: $terheles,
+          ram: {ossz_mb: $ram_ossz, hasznalt_mb: ($ram_ossz - $ram_szabad),
+                szazalek: (($ram_ossz - $ram_szabad) * 100 / $ram_ossz | floor)},
+          lemezek: $lemezek, kontenerek: $kontenerek, pihole: $pihole,
+          egeszseg: $egeszseg, tailscale: $tailscale,
+          mentes: {ido: $mentes, kor_ora: (if $mentes > 0 then (($ido - $mentes) / 3600 | floor) else -1 end)}}' \
+        >"${CEL}.uj" && chmod 644 "${CEL}.uj" && mv "${CEL}.uj" "$CEL"
+}
+
+telepit() {
+    cat >/etc/systemd/system/park-allapot.service <<'SVC'
+[Unit]
+Description=park-allapot: a szerver állapota JSON-ba (kijelzőknek)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/park-allapot
+Nice=10
+SVC
+    cat >/etc/systemd/system/park-allapot.timer <<'TMR'
+[Unit]
+Description=park-allapot 30 másodpercenként
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=2s
+
+[Install]
+WantedBy=timers.target
+TMR
+    systemctl daemon-reload
+    systemctl enable --now park-allapot.timer
+}
+
+case "${1:-}" in
+    -h|--help) sugo ;;
+    --telepit) telepit ;;
+    --eltavolit)
+        systemctl disable --now park-allapot.timer 2>/dev/null
+        rm -f /etc/systemd/system/park-allapot.{service,timer}
+        systemctl daemon-reload ;;
+    --kiir) keszit && jq . "$CEL" ;;
+    "") keszit ;;
+    *) echo "Ismeretlen kapcsoló: $1 (súgó: --help)" >&2; exit 1 ;;
+esac

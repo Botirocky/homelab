@@ -1,0 +1,25 @@
+services:
+  scrutiny:
+    image: ghcr.io/analogj/scrutiny:master-omnibus
+    container_name: park-scrutiny
+    restart: unless-stopped
+    ports:
+      - "8106:8080"
+    cap_add:
+      - SYS_RAWIO
+      - SYS_ADMIN
+    volumes:
+      - /run/udev:/run/udev:ro
+      - ${ADAT_DIR}/scrutiny/config:/opt/scrutiny/config
+      - ${ADAT_DIR}/scrutiny/influxdb:/opt/scrutiny/influxdb
+    environment:
+      TZ: ${TZ}
+      COLLECTOR_CRON_SCHEDULE: "15 */6 * * *"
+    mem_limit: 384m
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

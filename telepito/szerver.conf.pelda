@@ -1,0 +1,191 @@
+# Szerverpark – beállítások
+# ==========================
+# Másold ide:  /etc/szerverpark.conf   – így a telepítő kérdés nélkül fut (--auto).
+# A telepítő az első (varázslós) futás után magától is ide írja a válaszaidat.
+
+# --- hova kerüljenek a dolgok -----------------------------------------------
+PARK_DIR="/srv/szerverpark"          # beállítások, compose-fájlok, weboldalak
+ADAT_DIR="/srv/szerverpark/adat"     # AZ ADATOK – ide tedd a nagy lemezt!
+                                      # pl. ADAT_DIR="/mnt/adatlemez"
+
+# --- alapok ------------------------------------------------------------------
+IDOZONA="Europe/Budapest"
+SSH_PORT="22"
+
+# További portok, amiket a tűzfalnak nyitva kell hagynia – a gépen már futó
+# szolgáltatásoknak. Vesszővel elválasztva, proto nélkül tcp-t jelent.
+# pl. Pi-hole DNS + webfelület + csevegő:
+TUZFAL_EXTRA=""
+
+# --- címek -------------------------------------------------------------------
+# Belső domain: ezen a néven érhetők el a szolgáltatások a házon belül
+# (ai.park.lan, felho.park.lan, …). A DNS-ben vagy a hosts fájlban kell
+# a szerver IP-jére mutatnia.
+BELSO_DOMAIN="park.lan"
+
+# Publikus weboldal (internetről). Hagyd üresen, ha nincs.
+PUBLIKUS_DOMAIN=""
+EMAIL=""                              # Let's Encrypt értesítésekhez
+
+# --- fájlmegosztás -----------------------------------------------------------
+SMB_FELHASZNALO="admin"              # ő kap Samba- és Nextcloud-hozzáférést
+
+# A bedugott háttértárak ide kerülnek, és Sambán keresztül Windowsból/Linuxból
+# is elérhetők lesznek. A park-tarolo SOHA nem formáz, csak felcsatol.
+TAROLO_DIR="/srv/tarolok"
+
+# A Samba-megosztás helye. Üresen hagyva az ADAT_DIR/megosztas. Ha van külön
+# adatlemezed, ide mutass: MEGOSZTAS_DIR="/srv/tarolok/ADATLEMEZ/megosztas"
+MEGOSZTAS_DIR=""
+
+# A média (film, sorozat, zene) helye. Üresen hagyva az ADAT_DIR/media.
+# Nagy lemezre érdemes tenni: MEDIA_DIR="/srv/tarolok/ADATLEMEZ/media"
+MEDIA_DIR=""
+
+# --- mi menjen a NAGY lemezre? -----------------------------------------------
+# Ezek nőnek: érdemes őket külön adathordozóra tenni, hogy a rendszerlemez
+# (kártya, SSD) ne teljen meg és ne kopjon feleslegesen. Üresen hagyva minden
+# az ADAT_DIR alá kerül. Az adatbázisok SZÁNDÉKOSAN maradnak a rendszerlemezen:
+# ott gyorsak, és egy lehúzott pendrive nem viszi magával őket.
+
+# A Nextcloud felhasználói fájljai (fotók, dokumentumok).
+NC_FAJL_DIR=""
+# A Paperless iratai: beolvasott dokumentumok, export, és a "consume" mappa,
+# amibe a szkennelt lapokat dobod (Sambán is megosztható).
+IRATOK_DIR=""
+# Az Ollama modellek (több GB, bármikor újratölthetők – nem kell menteni).
+AI_MODELL_DIR=""
+
+# --- AI ----------------------------------------------------------------------
+# Mely helyi modellek töltődjenek le. ÜRESEN HAGYVA a telepítő a gép RAM/VRAM
+# mérete alapján válogat (csevegő + kódoló + gondolkodó + képértő + beágyazó).
+# A választható modellek listája:  park ai-katalogus
+AI_MODELLEK=""
+# pl. AI_MODELLEK="qwen2.5:14b qwen2.5-coder:7b deepseek-r1:7b nomic-embed-text"
+
+AI_BEAGYAZO="nomic-embed-text"   # dokumentum-kereséshez (RAG) használt modell
+WHISPER_MODELL="base"            # hangüzenet -> szöveg (tiny/base/small/medium)
+AI_KEPGENERALAS="n"              # ComfyUI képgenerálás (erős GPU kell hozzá)
+
+# --- felhős AI (Claude, GPT, Gemini) -----------------------------------------
+# Ezek NEM futnak a szerveren – a saját API-kulcsoddal éred el őket, de
+# ugyanabban az Open WebUI felületben jelennek meg, mint a helyi modellek.
+# Kulcsot később is megadhatsz:  park ai-kulcs anthropic sk-ant-...
+ANTHROPIC_API_KEY=""      # Claude   – console.anthropic.com
+OPENAI_API_KEY=""         # GPT      – platform.openai.com
+GEMINI_API_KEY=""         # Gemini   – aistudio.google.com
+GROQ_API_KEY=""           # Groq     – nagyon gyors, van ingyenes keret
+MISTRAL_API_KEY=""
+DEEPSEEK_API_KEY=""
+XAI_API_KEY=""
+OPENROUTER_API_KEY=""     # egy kulcs sok modellhez
+
+# --- virtuális gépek ---------------------------------------------------------
+# Az ISO-ból telepített "igazi" VM-ek alapértelmezései (park vm uj):
+VM_CPU="2"
+VM_RAM="4096"        # MB
+VM_LEMEZ="40"        # GB
+VM_OS="generic"      # pontosabb: osinfo-query os | grep debian
+
+# A test lab gépek alapértelmezései (park lab uj):
+LAB_CPU="2"
+LAB_RAM="2GiB"
+
+# --- mentés ------------------------------------------------------------------
+# Hova mentsen a restic. Külső lemez esetén pl. "/mnt/usb-mentes/repo"
+MENTES_CEL="/srv/szerverpark/mentes/repo"
+
+# Az őrszem (park-orzo) alapból a "park-" előtagú konténereket figyeli. Ha van
+# külön telepített konténered, amit szintén újra kell indítani leállás után,
+# itt sorold fel a nevét. Pl.: ORZO_EXTRA="pihole"
+ORZO_EXTRA=""
+
+# Hány másodpercig hagyja békén az őrszem a frissen indult, de még
+# "egészségtelen" konténereket. Kis gépen egy Open WebUI vagy Paperless percekig
+# indul – ha közben újraindítanánk, sosem érne a végére. Alapértelmezés: 600.
+ORZO_TUREM=""
+
+# További mentendő útvonalak, szóközzel elválasztva – ami nem a szerverparké,
+# de nem szeretnéd elveszíteni (pl. Pi-hole konfig, saját alkalmazás mappája):
+MENTES_EXTRA=""
+
+# --- felügyelet / értesítés --------------------------------------------------
+# A park-egeszseg (állapot-ellenőrzés) és a park-orzo (őrszem) ezeken keresztül
+# riaszt. Elég egyet beállítani; üresen hagyva csak a konzolra ír. Teszt:
+#   park ertesit --teszt
+# (Titkosabb webhook-URL-t inkább a ${PARK_DIR}/.env-be tegyél, az chmod 600.)
+NTFY_URL=""            # pl. https://ntfy.sh/valami-titkos-topic  (telefon-push)
+DISCORD_WEBHOOK=""     # Discord csatorna webhook-címe
+ERTESITO_EMAIL=""      # e-mail cím (msmtp/mail vagy sendmail kell hozzá)
+
+# --- opcionális modulok ------------------------------------------------------
+# Ezek alapból NEM települnek (MOD_…="n"); egyenként: sudo ./telepito.sh --csak fotok
+
+# dns: az Unbound portja; PIHOLE_UNBOUND="i" = a Pi-hole-t kérdés nélkül átállítja rá
+UNBOUND_PORT="5335"
+PIHOLE_UNBOUND=""
+
+# fotok: az Immich ide tölti fel a képeket (nagy lemezre!). A TAROLO_DIR csak
+# olvasva látszik benne /tarolok néven – onnan "külső könyvtárként" felvehető.
+FOTO_DIR=""
+FOTO_ML=""            # arcfelismerés, szöveges keresés; üres = ARM-on és 12 GB alatt KI
+
+# konyvek: a könyvtárak (konyvek, kepregenyek, hangoskonyvek, podcastok) helye;
+# üresen a MEDIA_DIR
+KONYV_DIR=""
+
+# offline: a .zim fájlok helye (nem kerül a mentésbe), és mit töltsön le magától
+KIWIX_DIR=""
+KIWIX_LETOLT=""       # teljes URL-ek szóközzel, https://download.kiwix.org/zim/ alól
+
+# jatek: a Mojang EULA elfogadása nélkül nem települ
+MINECRAFT_EULA=""     # "i" = elfogadom (https://aka.ms/MinecraftEULA)
+MC_TIPUS="PAPER"      # PAPER, FABRIC, FORGE, VANILLA
+MC_VERZIO="LATEST"
+MC_MEMORIA=""         # üres = a RAM alapján (1G/2G/4G)
+MC_MODOK=""           # Modrinth azonosítók vesszővel, pl. "lithium,ferrite-core"
+
+# botok: egy almappa = egy bot (requirements.txt + bot.py/main.py, titkok a .env-ben)
+BOTOK_DIR=""
+
+# ci: egyszerre hány CI-feladat fusson
+CI_PARHUZAMOS="1"
+
+# sso: mely címek kerüljenek a közös belépés mögé (a .park.lan előtti rész)
+SSO_VEDETT=""         # üres = "valtozas pdf eszkozok wiki"
+
+# --- mely modulok fussanak (i = igen, n = nem) --------------------------------
+MOD_ALAP="i"        # csomagok, tűzfal, fail2ban, automatikus frissítés
+MOD_DOCKER="i"      # Docker Engine + Compose
+MOD_PROXY="i"       # Caddy reverse proxy
+MOD_AI="i"          # Ollama + Open WebUI
+MOD_FAJLOK="i"      # Nextcloud + FileBrowser
+MOD_SAMBA="i"       # helyi hálózati fájlmegosztás
+MOD_WEB="i"         # saját weboldalak
+MOD_SELFHOST="i"    # Dockge, Uptime Kuma, Homepage, Vaultwarden, Forgejo
+MOD_SZINKRON="i"    # FileBrowser + Syncthing
+MOD_MEDIA="i"       # Jellyfin + Navidrome
+MOD_IRATOK="i"      # Paperless-ngx + Linkding + Wallabag
+MOD_KARBANTARTAS="i" # Watchtower + Dozzle + Speedtest Tracker
+MOD_VM="i"          # virtuális gépek (KVM) + test lab (Incus) + Cockpit
+MOD_MENTES="i"      # napi restic mentés
+MOD_DNS="n"         # Unbound saját DNS-feloldó
+MOD_OTTHON="n"      # Home Assistant + Mosquitto MQTT
+MOD_FOTOK="n"       # Immich
+MOD_KONYVEK="n"     # Kavita + Audiobookshelf
+MOD_HIREK="n"       # Miniflux + changedetection.io
+MOD_ESZKOZOK="n"    # Stirling-PDF + IT-Tools
+MOD_OFFLINE="n"     # Kiwix
+MOD_PENZ="n"        # Actual Budget
+MOD_JATEK="n"       # Minecraft-szerver
+MOD_BOTOK="n"       # saját Python botok
+MOD_CI="n"          # Forgejo Actions runner
+MOD_MONITOR="n"     # Beszel
+MOD_JEGYZETEK="n"   # Memos + Vikunja
+MOD_MEGOSZTAS="n"   # PrivateBin + Excalidraw
+MOD_LELTAR="n"      # Homebox
+MOD_LEMEZ="n"       # Scrutiny
+MOD_CRONFIGYELO="n" # Healthchecks
+MOD_VEDELEM="n"     # CrowdSec
+MOD_KIJELZO="n"     # állapot-JSON az ESP32 kijelzőnek
+MOD_SSO="n"         # Tinyauth közös belépés

@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+if [[ -t 1 ]]; then
+    Z=$'\e[32m'; S=$'\e[33m'; P=$'\e[31m'; K=$'\e[36m'; N=$'\e[0m'; G=$'\e[90m'; F=$'\e[1;37m'
+else Z=""; S=""; P=""; K=""; N=""; G=""; F=""; fi
+
+cim()  { printf '\n%s╭─ %s%s\n' "$K" "$*" "$N"; }
+info() { printf '%s│%s  %s\n' "$K" "$N" "$*"; }
+ok()   { printf '%s│%s  %s✔%s %s\n' "$K" "$N" "$Z" "$N" "$*"; }
+figy() { printf '%s│%s  %s!%s %s\n' "$K" "$N" "$S" "$N" "$*"; }
+hiba() { printf '%s│%s  %s✘ %s%s\n' "$K" "$N" "$P" "$*" "$N" >&2; }
+vege() { printf '%s╰─%s\n' "$K" "$N"; }
+van()  { command -v "$1" >/dev/null 2>&1; }
+
+root_e() { [[ ${EUID:-$(id -u)} -eq 0 ]]; }
+root_kell() {
+    root_e || { hiba "ehhez root kell (élő rendszeren: sudo mento $1)"; return 1; }
+}
+megerosit() {
+    local v
+    read -r -p "$(printf '%s? %s%s [ird be: IGEN]: ' "$S" "$N" "$1")" v </dev/tty || return 1
+    [[ "$v" == "IGEN" ]]
+}
+valassz_lemez() {
+    lsblk -dpno NAME,SIZE,MODEL 2>/dev/null | grep -vE 'loop|/dev/ram' | nl -w2 -s') '
+    local v
+    read -r -p "$(printf '%s? %seszköz (pl. /dev/sda): ' "$S" "$N")" v </dev/tty || return 1
+    printf '%s' "$v"
+}
+valassz_part() {
+    lsblk -pno NAME,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null | grep -vE 'loop' | nl -w2 -s') '
+    local v
+    read -r -p "$(printf '%s? %spartíció (pl. /dev/sda2): ' "$S" "$N")" v </dev/tty || return 1
+    printf '%s' "$v"
+}
+
+t_rendszer() {
+    cim "Rendszer- és hardver-infó"
+    info "gép:    $(hostname 2>/dev/null || echo '?')"
+    info "kernel: $(uname -sr)"
+    [[ -r /etc/os-release ]] && info "OS:     $(. /etc/os-release; echo "${PRETTY_NAME:-?}")"
+    info "idő:    $(date '+%F %T %Z')"
+    info "uptime: $(uptime -p 2>/dev/null | sed 's/^up //' || echo '?')"
+    local cpu; cpu="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ //')"
+    info "CPU:    ${cpu:-?} × $(nproc 2>/dev/null || echo '?')"
+    info "RAM:    $(free -h 2>/dev/null | awk '/^Mem:/{print $3"/"$2}')"
+    info "firmware: $([[ -d /sys/firmware/efi ]] && echo UEFI || echo 'BIOS (legacy)')"
+    echo
+    info "blokkeszközök:"
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null | sed 's/^/    /'
+    echo
+    info "hálózat:"
+    ip -br addr 2>/dev/null | sed 's/^/    /' || ifconfig -a 2>/dev/null | sed 's/^/    /'
+    vege
+}
+
+t_lemezek() {
+    cim "Lemezek és partíciók"
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT 2>/dev/null | sed 's/^/  /'
+    echo
+    info "helyfoglalás:"
+    df -hT 2>/dev/null | grep -vE 'tmpfs|devtmpfs|overlay|squashfs' | sed 's/^/  /'
+    if van smartctl; then
+        echo
+        local d
+        for d in $(lsblk -dpno NAME 2>/dev/null | grep -vE 'loop|/dev/ram'); do
+            local health
+            health="$(smartctl -H "$d" 2>/dev/null | grep -iE 'overall-health|SMART Health' | cut -d: -f2 | sed 's/^ //')"
+            [[ -n "$health" ]] && info "SMART ${d}: ${health}"
+        done
+    else
+        figy "smartctl nincs telepítve – a lemez-egészség (SMART) kihagyva"
+    fi
+    vege
+}
+
+t_halozat() {
+    cim "Hálózat"
+    if [[ "${1:-}" != "teszt" ]] && root_e; then
+        info "kapcsolat felhúzása…"
+        local i
+        for i in $(ls /sys/class/net 2>/dev/null | grep -v lo); do
+            ip link set "$i" up 2>/dev/null || true
+        done
+        if van dhclient; then fut_halkan dhclient -v 2>/dev/null || true
+        elif van dhcpcd; then fut_halkan dhcpcd 2>/dev/null || true
+        elif van udhcpc; then
+            for i in $(ls /sys/class/net 2>/dev/null | grep -v lo); do udhcpc -i "$i" -q 2>/dev/null || true; done
+        fi
+    fi
+    info "címek:"
+    ip -br addr 2>/dev/null | sed 's/^/  /'
+    info "átjáró:"
+    ip route 2>/dev/null | grep default | sed 's/^/  /' || info "  (nincs default route)"
+    echo
+    if ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; then ok "internet elérhető (IP)"; else figy "nincs IP-kapcsolat"; fi
+    if ping -c1 -W2 debian.org >/dev/null 2>&1; then ok "DNS-feloldás működik"; else figy "a DNS nem old fel"; fi
+    vege
+}
+fut_halkan() { "$@" >/dev/null 2>&1; }
+
+t_fajlrendszer() {
+    cim "Fájlrendszer ellenőrzés / javítás"
+    root_kell fajlrendszer || { vege; return 1; }
+    local p; p="$(valassz_part)"; [[ -n "$p" && -b "$p" ]] || { hiba "nincs ilyen eszköz: $p"; vege; return 1; }
+    if mount | grep -q "^$p "; then hiba "$p csatolva van – előbb csatold le (umount $p)"; vege; return 1; fi
+    local fs; fs="$(lsblk -no FSTYPE "$p" 2>/dev/null)"
+    info "eszköz: $p   fájlrendszer: ${fs:-ismeretlen}"
+    megerosit "Lefuttassam a javítást ezen: $p?" || { info "megszakítva"; vege; return 0; }
+    case "$fs" in
+        ext2|ext3|ext4) fut_ell e2fsck -fy "$p" ;;
+        xfs)            fut_ell xfs_repair "$p" ;;
+        btrfs)          fut_ell btrfs check --repair "$p" ;;
+        vfat|fat)       fut_ell fsck.vfat -a "$p" ;;
+        ntfs)           fut_ell ntfsfix "$p" ;;
+        *)              fut_ell fsck -y "$p" ;;
+    esac
+    vege
+}
+fut_ell() { van "$1" && "$@" || hiba "a(z) $1 nem elérhető ezen a rendszeren"; }
+
+t_chroot() {
+    cim "Chroot a telepített rendszerbe (javításhoz)"
+    root_kell chroot || { vege; return 1; }
+    local p; p="$(valassz_part)"; [[ -b "$p" ]] || { hiba "nincs ilyen partíció"; vege; return 1; }
+    local cel=/mnt/rendszer
+    mkdir -p "$cel"
+    mount "$p" "$cel" 2>/dev/null || { hiba "nem sikerült csatolni: $p"; vege; return 1; }
+    local espd
+    espd="$(lsblk -pno NAME,PARTTYPE 2>/dev/null | awk 'tolower($2)=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"{print $1; exit}')"
+    [[ -n "$espd" && -d "$cel/boot/efi" ]] && mount "$espd" "$cel/boot/efi" 2>/dev/null || true
+    local m
+    for m in dev dev/pts proc sys run; do mount --rbind "/$m" "$cel/$m" 2>/dev/null || mount --bind "/$m" "$cel/$m" 2>/dev/null || true; done
+    ok "csatolva ide: $cel"
+    info "belépsz a chrootba – 'exit' a kilépéshez, utána a leválasztás automatikus"
+    chroot "$cel" /bin/bash -l || chroot "$cel" /bin/sh -l || true
+    for m in run sys proc dev/pts dev; do umount -R "$cel/$m" 2>/dev/null || umount "$cel/$m" 2>/dev/null || true; done
+    umount "$cel/boot/efi" 2>/dev/null || true
+    umount -R "$cel" 2>/dev/null || umount "$cel" 2>/dev/null || true
+    ok "leválasztva"
+    vege
+}
+
+t_rendszerbetolto() {
+    cim "Rendszerbetöltő (GRUB) újratelepítése"
+    root_kell rendszerbetolto || { vege; return 1; }
+    local p; p="$(valassz_part)"; [[ -b "$p" ]] || { hiba "nincs ilyen partíció"; vege; return 1; }
+    local cel=/mnt/rendszer; mkdir -p "$cel"
+    mount "$p" "$cel" 2>/dev/null || { hiba "nem csatolható: $p"; vege; return 1; }
+    local m; for m in dev dev/pts proc sys; do mount --rbind "/$m" "$cel/$m" 2>/dev/null || mount --bind "/$m" "$cel/$m" 2>/dev/null || true; done
+    if [[ -d /sys/firmware/efi ]]; then
+        local esp; esp="$(valassz_lemez)"
+        info "EFI mód"
+        [[ -d "$cel/boot/efi" ]] && mount "$esp" "$cel/boot/efi" 2>/dev/null || true
+        chroot "$cel" bash -c 'grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian && update-grub' \
+            && ok "GRUB (EFI) újratelepítve" || hiba "a GRUB-telepítés hibázott"
+        umount "$cel/boot/efi" 2>/dev/null || true
+    else
+        local d; d="$(valassz_lemez)"
+        info "BIOS/legacy mód → $d"
+        chroot "$cel" bash -c "grub-install $d && update-grub" \
+            && ok "GRUB (BIOS) újratelepítve ide: $d" || hiba "a GRUB-telepítés hibázott"
+    fi
+    for m in sys proc dev/pts dev; do umount -R "$cel/$m" 2>/dev/null || umount "$cel/$m" 2>/dev/null || true; done
+    umount -R "$cel" 2>/dev/null || umount "$cel" 2>/dev/null || true
+    vege
+}
+
+t_jelszo() {
+    cim "Root jelszó visszaállítása"
+    root_kell jelszo || { vege; return 1; }
+    local p; p="$(valassz_part)"; [[ -b "$p" ]] || { hiba "nincs ilyen partíció"; vege; return 1; }
+    local cel=/mnt/rendszer; mkdir -p "$cel"
+    mount "$p" "$cel" 2>/dev/null || { hiba "nem csatolható: $p"; vege; return 1; }
+    local m; for m in dev proc sys; do mount --bind "/$m" "$cel/$m" 2>/dev/null || true; done
+    info "állítsd be az új root jelszót:"
+    chroot "$cel" passwd root && ok "jelszó frissítve" || hiba "sikertelen"
+    for m in sys proc dev; do umount "$cel/$m" 2>/dev/null || true; done
+    umount "$cel" 2>/dev/null || true
+    vege
+}
+
+t_mentes() {
+    cim "Mentés visszaállítása (restic)"
+    if ! van restic; then hiba "a restic nincs telepítve"; vege; return 1; fi
+    local repo="${MENTES_CEL:-}" jelszo="${RESTIC_JELSZO:-}"
+    [[ -z "$repo" ]] && repo="$(read -r -p "$(printf '%s? %srestic tároló útvonala/URL: ' "$S" "$N")" x </dev/tty; echo "$x")"
+    [[ -z "$jelszo" ]] && read -rsp "$(printf '%s? %srestic jelszó: ' "$S" "$N")" jelszo </dev/tty && echo
+    export RESTIC_PASSWORD="$jelszo"
+    info "pillanatképek:"
+    restic -r "$repo" snapshots 2>/dev/null | tail -12 | sed 's/^/  /' || { hiba "a tároló nem elérhető"; vege; return 1; }
+    local id cel
+    id="$(read -r -p "$(printf '%s? %svisszaállítandó snapshot (id vagy latest): ' "$S" "$N")" x </dev/tty; echo "$x")"
+    cel="$(read -r -p "$(printf '%s? %shova állítsuk vissza (mappa): ' "$S" "$N")" x </dev/tty; echo "$x")"
+    [[ -n "$id" && -n "$cel" ]] || { info "megszakítva"; vege; return 0; }
+    megerosit "Visszaállítás ${id} → ${cel}?" || { info "megszakítva"; vege; return 0; }
+    mkdir -p "$cel"
+    restic -r "$repo" restore "$id" --target "$cel" && ok "visszaállítva ide: $cel" || hiba "a visszaállítás hibázott"
+    vege
+}
+
+t_klonozas() {
+    cim "Lemez klónozása / mentése (ddrescue)"
+    root_kell klonozas || { vege; return 1; }
+    if ! van ddrescue; then hiba "a ddrescue (gddrescue) nincs telepítve"; vege; return 1; fi
+    info "forrás kiválasztása:"; local src; src="$(valassz_lemez)"; [[ -b "$src" ]] || { hiba "nincs ilyen eszköz"; vege; return 1; }
+    local kep log
+    kep="$(read -r -p "$(printf '%s? %scél képfájl (pl. /mnt/kulso/lemez.img): ' "$S" "$N")" x </dev/tty; echo "$x")"
+    [[ -n "$kep" ]] || { info "megszakítva"; vege; return 0; }
+    log="${kep}.log"
+    megerosit "Mentsem a(z) ${src} teljes tartalmát ide: ${kep}?" || { info "megszakítva"; vege; return 0; }
+    ddrescue -f -n "$src" "$kep" "$log" && ddrescue -d -r3 "$src" "$kep" "$log" \
+        && ok "kész: $kep (napló: $log)" || hiba "a mentés hibázott"
+    vege
+}
+
+t_memoria() {
+    cim "Memória-teszt"
+    if van memtester; then
+        local mb; mb="$(read -r -p "$(printf '%s? %shány MB-ot teszteljek (pl. 512): ' "$S" "$N")" x </dev/tty; echo "$x")"
+        memtester "${mb:-256}M" 1 || true
+    elif [[ -e /boot/memtest86+* ]] || grep -qi memtest /boot/grub/grub.cfg 2>/dev/null; then
+        info "indítsd újra és válaszd a GRUB-menüből a 'Memory test (memtest86+)' elemet"
+    else
+        figy "nincs memtester; live-bootnál a GRUB-menü Memtest eleme használható"
+    fi
+    vege
+}
+
+elo_rendszer() { [[ -d /run/live/medium ]]; }
+
+t_ssh() {
+    local mit="${1:-allapot}" dropin=/etc/ssh/sshd_config.d/10-botirocky-elo.conf
+    cim "SSH távoli eléréshez"
+    case "$mit" in
+        be)
+            root_kell ssh || { vege; return 1; }
+            if elo_rendszer; then
+                local felh; felh="$(getent passwd 1000 | cut -d: -f1)"; felh="${felh:-user}"
+                info "adj új jelszót a(z) ${felh} felhasználónak (az alap 'live' jelszóval NEM engedem)"
+                passwd "$felh" </dev/tty || { hiba "a jelszó nem változott – az SSH marad kikapcsolva"; vege; return 1; }
+                printf 'PasswordAuthentication yes\nAllowUsers %s root\n' "$felh" > "$dropin"
+                info "jelszavas belépés: ${felh} (csak erre az élő munkamenetre, újraindításkor elvész)"
+            fi
+            systemctl start botirocky-ssh-kulcsok.service 2>/dev/null || ssh-keygen -A >/dev/null
+            systemctl restart ssh.service
+            ok "SSH fut – címek:"
+            ip -4 -o addr show scope global | awk '{print "      " $2 "  " $4}'
+            [[ -s /root/.ssh/authorized_keys ]] && info "root kulccsal is beléphet"
+            ;;
+        ki)
+            root_kell ssh || { vege; return 1; }
+            rm -f "$dropin"
+            systemctl stop ssh.service ssh.socket 2>/dev/null || true
+            ok "SSH leállítva"
+            ;;
+        *)
+            if systemctl is-active --quiet ssh.service; then ok "SSH fut"; else info "SSH nem fut (bekapcsolás: sudo mento ssh be)"; fi
+            [[ -f $dropin ]] && figy "jelszavas belépés engedélyezve (élő munkamenet)"
+            ;;
+    esac
+    vege
+}
+
+t_ssh_be() { t_ssh be; }
+
+menu() {
+    local cimek=(
+        "rendszer|Rendszer- és hardver-infó"
+        "lemezek|Lemezek, partíciók, SMART"
+        "halozat|Hálózat felhúzása + teszt"
+        "ssh_be|SSH bekapcsolása távoli segítséghez"
+        "fajlrendszer|Fájlrendszer ellenőrzés/javítás"
+        "chroot|Chroot a telepített rendszerbe"
+        "rendszerbetolto|GRUB újratelepítése"
+        "jelszo|Root jelszó visszaállítása"
+        "mentes|Mentés visszaállítása (restic)"
+        "klonozas|Lemez mentése képfájlba (ddrescue)"
+        "memoria|Memória-teszt"
+    )
+    if van whiptail; then
+        local args=() e nev leiras
+        for e in "${cimek[@]}"; do nev="${e%%|*}"; leiras="${e#*|}"; args+=("$nev" "$leiras"); done
+        while true; do
+            local v
+            v="$(whiptail --title "Botirocky – mentőkészlet" --menu "Válassz eszközt:" 20 66 12 \
+                 "${args[@]}" "kilepes" "Kilépés a shellbe" 3>&1 1>&2 2>&3)" || break
+            [[ "$v" == "kilepes" ]] && break
+            clear; "t_${v}"; read -r -p "$(printf '\n[Enter a menühöz] ')" _ </dev/tty || break
+        done
+    else
+        while true; do
+            printf '\n%s%s Botirocky – mentőkészlet %s\n' "$F" "═══" "$N"
+            local i=1 e
+            for e in "${cimek[@]}"; do printf '  %s%2d%s) %s\n' "$Z" "$i" "$N" "${e#*|}"; i=$((i+1)); done
+            printf '  %s 0%s) kilépés a shellbe\n' "$Z" "$N"
+            local v; read -r -p "$(printf '%s? %sválasztás: ' "$S" "$N")" v </dev/tty || break
+            [[ "$v" == "0" || -z "$v" ]] && break
+            if [[ "$v" =~ ^[0-9]+$ ]] && (( v>=1 && v<=${#cimek[@]} )); then
+                local nev="${cimek[$((v-1))]%%|*}"; "t_${nev}"
+            else
+                hiba "érvénytelen"
+            fi
+        done
+    fi
+}
+
+[[ -f /etc/szerverpark.conf ]] && source /etc/szerverpark.conf 2>/dev/null || true
+[[ -f /srv/szerverpark/.env ]] && { set -a; source /srv/szerverpark/.env 2>/dev/null; set +a; } || true
+
+parancs="${1:-menu}"; shift || true
+case "$parancs" in
+    menu)            menu ;;
+    rendszer|info)   t_rendszer ;;
+    lemezek|lemez)   t_lemezek ;;
+    halozat)         t_halozat "${1:-}" ;;
+    ssh)             t_ssh "${1:-}" ;;
+    fajlrendszer|fsck) t_fajlrendszer ;;
+    chroot)          t_chroot ;;
+    rendszerbetolto|grub) t_rendszerbetolto ;;
+    jelszo)          t_jelszo ;;
+    mentes)          t_mentes ;;
+    klonozas)        t_klonozas ;;
+    memoria)         t_memoria ;;
+    -h|--help|sugo)
+        cat <<SUGO
+mento – Botirocky mentőkészlet
+Argumentum nélkül interaktív menü. Közvetlenül is: mento <eszköz>
+
+  rendszer     lemezek     halozat [teszt]   ssh [be|ki]   fajlrendszer   chroot
+  rendszerbetolto   jelszo   mentes   klonozas   memoria
+SUGO
+        ;;
+    *) hiba "ismeretlen: $parancs"; exit 1 ;;
+esac

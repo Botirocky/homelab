@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+PARK_DIR="${PARK_DIR:-/srv/szerverpark}"
+[[ -r /etc/szerverpark.conf ]] && source /etc/szerverpark.conf
+TAROLO_DIR="${TAROLO_DIR:-/srv/tarolok}"
+SMB_FELHASZNALO="${SMB_FELHASZNALO:-$(getent passwd 1000 | cut -d: -f1)}"
+SMB_MEGOSZTAS_CONF="/etc/samba/park-tarolok.conf"
+TAROLO_CSAK_OLVAS="${TAROLO_CSAK_OLVAS:-}"
+UDEV_SZABALY="/etc/udev/rules.d/99-park-tarolo.rules"
+
+if [[ -t 1 ]]; then Z=$'\e[32m'; S=$'\e[33m'; P=$'\e[31m'; K=$'\e[36m'; N=$'\e[0m'; G=$'\e[90m'
+else Z=""; S=""; P=""; K=""; N=""; G=""; fi
+
+ok()   { printf '%s✔%s %s\n' "$Z" "$N" "$*"; }
+info() { printf '%s•%s %s\n' "$K" "$N" "$*"; }
+figy() { printf '%s!%s %s\n' "$S" "$N" "$*" >&2; }
+hiba() { printf '%s✘%s %s\n' "$P" "$N" "$*" >&2; }
+naplo() { logger -t park-tarolo "$*" 2>/dev/null; }
+
+sugo() {
+    cat <<'SUGO'
+park-tarolo – bedugott háttértárak automatikus felismerése és felcsatolása.
+
+  SOHA NEM FORMÁZ. Csak felcsatolja, amit talál; a formázatlan eszközt jelenti.
+
+  park-tarolo lista                 mit lát a gép (csatolva / csatolatlan)
+  park-tarolo auto                  minden felismert tárolót felcsatol
+  park-tarolo csatol <eszköz>       egy eszköz felcsatolása (pl. sda1)
+  park-tarolo lecsatol <eszköz|név> biztonságos leválasztás
+  park-tarolo samba-frissit         megosztások újragenerálása
+  sudo park-tarolo vedelem          a beállított tárolók csatolási pontjának zárolása:
+                                    ha a lemez nincs bent, semmi nem írhat a helyére
+  sudo park-tarolo inditas <mappa>  a tárolóra váró konténerek elindítása
+  sudo park-tarolo --telepit        udev-szabály: bedugásra magától felcsatol
+  sudo park-tarolo --eltavolit      az automatika kikapcsolása
+
+A tárolók ide kerülnek:  /srv/tarolok/<címke>
+és Sambán keresztül Windowsból és Linuxból is elérhetők.
+SUGO
+}
+
+rendszer_eszkoz() {
+    local dev="$1" gyoker
+    gyoker="$(findmnt -no SOURCE / 2>/dev/null)"
+    gyoker="$(lsblk -no PKNAME "$gyoker" 2>/dev/null || true)"
+    [[ -n "$gyoker" && "$dev" == "$gyoker"* ]] && return 0
+    [[ "$dev" == mmcblk* || "$dev" == nvme0n1* ]] && findmnt -no SOURCE / | grep -q "$dev" && return 0
+    return 1
+}
+
+nev_general() {
+    local dev="$1" cimke uuid
+    cimke="$(lsblk -no LABEL "/dev/$dev" 2>/dev/null | head -1 | tr -d ' ')"
+    if [[ -n "$cimke" ]]; then
+        printf '%s' "$cimke" | iconv -f utf-8 -t ascii//TRANSLIT 2>/dev/null | tr -c 'A-Za-z0-9_.-' '_'
+        return
+    fi
+    uuid="$(lsblk -no UUID "/dev/$dev" 2>/dev/null | head -1)"
+    printf 'tarolo-%s' "${uuid:0:8}"
+}
+
+mount_opciok() {
+    local fstype="$1" mod="${2:-rw}" uid gid
+    uid="$(id -u "$SMB_FELHASZNALO" 2>/dev/null || echo 1000)"
+    gid="$(id -g "$SMB_FELHASZNALO" 2>/dev/null || echo 1000)"
+    case "$fstype" in
+        vfat|exfat) printf '%s,nosuid,nodev,noatime,uid=%s,gid=%s,umask=002' "$mod" "$uid" "$gid" ;;
+        ntfs|ntfs3)  printf '%s,nosuid,nodev,noatime,uid=%s,gid=%s,umask=002' "$mod" "$uid" "$gid" ;;
+        ext2|ext3|ext4|btrfs|xfs|f2fs) printf '%s,nosuid,nodev,noatime' "$mod" ;;
+        *) printf '%s,nosuid,nodev,noatime' "$mod" ;;
+    esac
+}
+
+driver_ellenoriz() {
+    local fstype="$1"
+    case "$fstype" in
+        exfat) { modprobe exfat 2>/dev/null; grep -q exfat /proc/filesystems 2>/dev/null; } || command -v mount.exfat >/dev/null || command -v mount.exfat-fuse >/dev/null || {
+                   figy "exFAT driver hiányzik – telepítsd: sudo apt-get install -y exfatprogs"; return 1; } ;;
+        ntfs|ntfs3) grep -q ntfs3 /proc/filesystems 2>/dev/null || command -v mount.ntfs-3g >/dev/null || {
+                   figy "NTFS driver hiányzik – telepítsd: sudo apt-get install -y ntfs-3g"; return 1; } ;;
+    esac
+    return 0
+}
+
+tarolok_listaja() {
+    lsblk -rno NAME,FSTYPE,SIZE,LABEL,MOUNTPOINT,TYPE 2>/dev/null | while read -r nev fstype meret cimke mp tipus; do
+        [[ "$tipus" == "part" || "$tipus" == "disk" ]] || continue
+        [[ -n "$fstype" ]] || continue
+        [[ "$fstype" == "swap" || "$fstype" == "linux_raid_member" ]] && continue
+        rendszer_eszkoz "$nev" && continue
+        printf '%s\t%s\t%s\t%s\t%s\n' "$nev" "$fstype" "$meret" "${cimke:--}" "${mp:--}"
+    done
+}
+
+parancs_lista() {
+    printf '\n%sBedugott tárolók%s\n\n' "$K" "$N"
+    printf '  %-10s %-8s %-8s %-16s %s\n' ESZKÖZ FS MÉRET CÍMKE CSATOLVA
+    printf '  %s\n' "────────────────────────────────────────────────────────────────"
+    local van=0
+    while IFS=$'\t' read -r nev fstype meret cimke mp; do
+        van=1
+        printf '  %-10s %-8s %-8s %-16s %s\n' "$nev" "$fstype" "$meret" "$cimke" "$mp"
+    done < <(tarolok_listaja)
+    [[ "$van" == 0 ]] && printf '  %s(nincs külső tároló)%s\n' "$G" "$N"
+    printf '\n'
+    local formazatlan
+    formazatlan="$(lsblk -rno NAME,FSTYPE,TYPE 2>/dev/null | awk '$3=="disk" && $2==""{print $1}')"
+    if [[ -n "$formazatlan" ]]; then
+        for d in $formazatlan; do
+            rendszer_eszkoz "$d" && continue
+            lsblk -rno NAME "/dev/$d" | tail -n +2 | grep -q . && continue
+            figy "/dev/$d formázatlan vagy ismeretlen fájlrendszerű – NEM nyúlok hozzá."
+        done
+    fi
+}
+
+parancs_csatol() {
+    local dev="${1#/dev/}"
+    [[ -b "/dev/$dev" ]] || { hiba "nincs ilyen eszköz: /dev/$dev"; return 1; }
+    rendszer_eszkoz "$dev" && { hiba "$dev a rendszerlemez – nem csatolom"; return 1; }
+
+    local fstype mp nev celpont
+    fstype="$(lsblk -no FSTYPE "/dev/$dev" | head -1 | tr -d ' ')"
+    [[ -n "$fstype" ]] || { figy "/dev/$dev: nincs felismerhető fájlrendszer – kihagyom (NEM formázom)"; return 1; }
+    [[ "$fstype" == "swap" ]] && return 0
+
+    mp="$(lsblk -no MOUNTPOINT "/dev/$dev" | head -1 | tr -d ' ')"
+    [[ -n "$mp" ]] && { info "$dev már csatolva: $mp"; return 0; }
+
+    driver_ellenoriz "$fstype" || return 1
+
+    local mod=rw uuid
+    uuid="$(lsblk -no UUID "/dev/$dev" 2>/dev/null | head -1 | tr -d ' ')"
+    [[ -n "$uuid" && " $TAROLO_CSAK_OLVAS " == *" $uuid "* ]] && mod=ro
+    if [[ "$fstype" == ntfs ]]; then
+        modprobe ntfs3 2>/dev/null
+        grep -q ntfs3 /proc/filesystems 2>/dev/null && fstype=ntfs3
+    fi
+    local opciok; opciok="$(mount_opciok "$fstype" "$mod")"
+
+    nev="$(nev_general "$dev")"
+    celpont="${TAROLO_DIR}/${nev}"
+    mkdir -p "$celpont"
+
+    if mount -t "$fstype" -o "$opciok" "/dev/$dev" "$celpont" 2>/dev/null \
+       || mount -o "$opciok" "/dev/$dev" "$celpont" 2>/dev/null; then
+        ok "csatolva: /dev/$dev ($fstype, $mod) -> $celpont"
+        naplo "csatolva /dev/$dev -> $celpont"
+        case "$fstype" in
+            ext2|ext3|ext4|btrfs|xfs|f2fs)
+                id "$SMB_FELHASZNALO" >/dev/null 2>&1 && chown "$SMB_FELHASZNALO:$SMB_FELHASZNALO" "$celpont" 2>/dev/null ;;
+        esac
+        parancs_samba_frissit
+        parancs_inditas "$celpont"
+        return 0
+    else
+        hiba "nem sikerült felcsatolni: /dev/$dev ($fstype)"
+        naplo "SIKERTELEN csatolás /dev/$dev"
+        rmdir "$celpont" 2>/dev/null
+        return 1
+    fi
+}
+
+parancs_lecsatol() {
+    local cel="${1:-}"
+    [[ -n "$cel" ]] || { hiba "melyik eszközt?"; return 1; }
+    local mp
+    if [[ -d "${TAROLO_DIR}/${cel}" ]]; then mp="${TAROLO_DIR}/${cel}"
+    elif [[ -b "/dev/${cel#/dev/}" ]]; then mp="$(lsblk -no MOUNTPOINT "/dev/${cel#/dev/}" | head -1 | tr -d ' ')"
+    else mp="$cel"; fi
+    [[ -n "$mp" ]] || { figy "nincs felcsatolva"; return 0; }
+    if command -v smbcontrol >/dev/null 2>&1 && [[ "$mp" == "$TAROLO_DIR"/* ]]; then
+        smbcontrol smbd close-share "$(basename "$mp")" >/dev/null 2>&1 && sleep 1
+    fi
+    sync
+    if umount "$mp" 2>/dev/null; then
+        ok "leválasztva: $mp"
+        rmdir "$mp" 2>/dev/null
+        parancs_samba_frissit
+    else
+        hiba "nem sikerült leválasztani (használja valami?): $mp"
+        command -v fuser >/dev/null && fuser -vm "$mp" 2>&1 | head -5
+        return 1
+    fi
+}
+
+parancs_auto() {
+    mkdir -p "$TAROLO_DIR"
+    local db=0
+    while IFS=$'\t' read -r nev fstype meret cimke mp; do
+        [[ "$mp" != "-" ]] && continue
+        parancs_csatol "$nev" && db=$((db+1))
+    done < <(tarolok_listaja)
+    [[ "$db" -gt 0 ]] && ok "$db tároló felcsatolva" || info "nincs új felcsatolandó tároló"
+}
+
+parancs_samba_frissit() {
+    command -v smbd >/dev/null 2>&1 || return 0
+    [[ -d /etc/samba ]] || return 0
+    local tmp; tmp="$(mktemp)"
+    {
+        printf '# A park-tarolo generálja. Kézzel ne szerkeszd.\n'
+        local d nev csak_olvas
+        for d in "$TAROLO_DIR"/*; do
+            [[ -d "$d" ]] || continue
+            mountpoint -q "$d" || continue
+            nev="$(basename "$d")"
+            csak_olvas=no
+            findmnt -no OPTIONS "$d" | grep -qE '(^|,)ro(,|$)' && csak_olvas=yes
+            cat <<SMB
+
+[${nev}]
+   comment = Tároló: ${nev}
+   path = ${d}
+   browseable = yes
+   read only = ${csak_olvas}
+   create mask = 0664
+   directory mask = 2775
+   valid users = ${SMB_FELHASZNALO}
+   force user = ${SMB_FELHASZNALO}
+SMB
+        done
+    } > "$tmp"
+
+    if [[ -f "$SMB_MEGOSZTAS_CONF" ]] && cmp -s "$tmp" "$SMB_MEGOSZTAS_CONF"; then
+        rm -f "$tmp"; return 0
+    fi
+    install -m 0644 "$tmp" "$SMB_MEGOSZTAS_CONF" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    rm -f "$tmp"
+
+    if ! grep -q "park-tarolok.conf" /etc/samba/smb.conf 2>/dev/null; then
+        printf '\ninclude = %s\n' "$SMB_MEGOSZTAS_CONF" >> /etc/samba/smb.conf
+    fi
+    smbcontrol all reload-config >/dev/null 2>&1 || systemctl reload smbd >/dev/null 2>&1 || true
+    naplo "Samba megosztások frissítve"
+}
+
+vedett_tarolok() {
+    local f
+    for f in /etc/szerverpark.conf "${PARK_DIR}/.env"; do
+        [[ -r "$f" ]] && grep -oE "${TAROLO_DIR%/}/[^/\"' ]+" "$f"
+    done | sort -u
+}
+
+zarolva() {
+    lsattr -d "$1" 2>/dev/null | awk '{print $1}' | grep -q i
+}
+
+vedelem_beallit() {
+    local mp="${1%/}" szulo alap tmp="" eredmeny=0
+    if mountpoint -q "$mp"; then
+        szulo="$(findmnt -no TARGET --target "$(dirname "$mp")")"
+        tmp="$(mktemp -d)"
+        if ! mount --bind "$szulo" "$tmp"; then
+            rmdir "$tmp"; figy "$mp: nem látok a csatolási pont alá"; return 1
+        fi
+        alap="${tmp}${mp#"${szulo%/}"}"
+    elif findmnt --fstab -n "$mp" >/dev/null 2>&1; then
+        alap="$mp"
+        mkdir -p "$alap"
+    else
+        info "$mp: nincs felcsatolva és nincs az fstab-ban – nem külön lemez, kihagyom"
+        return 0
+    fi
+
+    if zarolva "$alap"; then
+        ok "$mp: már védett"
+    elif find "$alap" -mindepth 1 ! -type d -print -quit | grep -q .; then
+        figy "$mp: a csatolási pont alatt (a rendszerlemezen) fájlok vannak – nem törlök semmit."
+        figy "  nézd meg őket, és ha szemét, töröld, majd: sudo park-tarolo vedelem"
+        find "$alap" -mindepth 1 ! -type d | sed "s|^${tmp}||; s|^|    |" | head -10 >&2
+        eredmeny=1
+    else
+        find "$alap" -mindepth 1 -depth -type d -empty -delete
+        if chattr +i "$alap"; then
+            ok "$mp: védve – lemez nélkül semmi nem írhat a helyére"
+            naplo "csatolási pont zárolva: $mp"
+        else
+            figy "$mp: a zárolás nem sikerült (chattr)"; eredmeny=1
+        fi
+    fi
+
+    if [[ -n "$tmp" ]]; then umount "$tmp" && rmdir "$tmp"; fi
+    return "$eredmeny"
+}
+
+utana_egyseg_ir() {
+    cat > /etc/systemd/system/park-tarolo-utana@.service <<'SVC'
+[Unit]
+Description=park-tarolo: a(z) %f tárolóra váró konténerek indítása
+BindsTo=%i.mount
+After=%i.mount docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/park-tarolo inditas %f
+SVC
+}
+
+parancs_vedelem() {
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || { hiba "root kell: sudo park-tarolo vedelem"; exit 1; }
+    command -v chattr >/dev/null 2>&1 || { hiba "a chattr hiányzik (e2fsprogs)"; return 1; }
+    local mp nev db=0 rossz=0
+    utana_egyseg_ir
+    while read -r mp; do
+        [[ -n "$mp" ]] || continue
+        db=$((db+1))
+        vedelem_beallit "$mp" || rossz=$((rossz+1))
+        if findmnt --fstab -n "$mp" >/dev/null 2>&1; then
+            nev="$(systemd-escape -p "$mp")"
+            mkdir -p "/etc/systemd/system/${nev}.mount.wants"
+            ln -sf /etc/systemd/system/park-tarolo-utana@.service \
+                "/etc/systemd/system/${nev}.mount.wants/park-tarolo-utana@${nev}.service"
+        fi
+    done < <(vedett_tarolok)
+    systemctl daemon-reload
+    [[ "$db" -eq 0 ]] && info "a beállításokban nincs ${TAROLO_DIR}/ alatti útvonal – nincs mit védeni"
+    [[ "$rossz" -eq 0 ]]
+}
+
+parancs_inditas() {
+    local mp="${1%/}" c allapot db=0
+    [[ -n "$mp" ]] || { hiba "melyik tároló? (pl. ${TAROLO_DIR}/PARKADAT)"; return 1; }
+    mountpoint -q "$mp" || { figy "$mp nincs felcsatolva"; return 1; }
+    command -v docker >/dev/null 2>&1 || return 0
+    systemctl is-active -q docker 2>/dev/null || return 0
+    while IFS='|' read -r c allapot; do
+        [[ "$allapot" == running ]] && continue
+        docker inspect -f '{{.State.Error}}' "$c" 2>/dev/null \
+            | grep -qF -e "'${mp}/" -e "'${mp}'" || continue
+        if docker start "$c" >/dev/null 2>&1; then
+            ok "elindítva: $c (megjött a tárolója: $mp)"
+            naplo "elindítva $c – megjött $mp"
+            db=$((db+1))
+        else
+            figy "nem indult: $c"
+        fi
+    done < <(docker ps -a --format '{{.Names}}|{{.State}}')
+    [[ "$db" -gt 0 ]] || info "$mp: nincs rá váró konténer"
+    return 0
+}
+
+parancs_telepit() {
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || { hiba "root kell: sudo park-tarolo --telepit"; exit 1; }
+    mkdir -p "$TAROLO_DIR"
+
+    cat > /etc/systemd/system/park-tarolo@.service <<'SVC'
+[Unit]
+Description=park-tarolo: %i automatikus felcsatolása
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/park-tarolo csatol %i
+RemainAfterExit=no
+SVC
+
+    # A SUBSYSTEMS=="usb" a szülő-eszközöket is vizsgálja, ezért az ID_BUS-ra
+    # szűréssel szemben a UAS/SATA-hidas házakat is elkapja: azok ID_BUS=ata-t
+    # jelentenek, és emiatt eddig kimaradtak. A belső lemezek nem usb-szülősek,
+    # a rendszerlemezt pedig a park-tarolo külön ellenőrzi.
+    cat > "$UDEV_SZABALY" <<'UDEV'
+ACTION=="add", SUBSYSTEM=="block", SUBSYSTEMS=="usb", ENV{ID_FS_TYPE}!="", ENV{ID_FS_TYPE}!="swap", TAG+="systemd", ENV{SYSTEMD_WANTS}+="park-tarolo@%k.service"
+UDEV
+
+    systemctl daemon-reload
+    udevadm control --reload-rules 2>/dev/null
+    ok "automatika bekapcsolva – a bedugott tárolók maguktól felcsatolódnak"
+    info "meglévő eszközök felcsatolása…"
+    parancs_auto
+    parancs_vedelem
+}
+
+parancs_eltavolit() {
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || { hiba "root kell"; exit 1; }
+    rm -f "$UDEV_SZABALY" /etc/systemd/system/park-tarolo@.service \
+        /etc/systemd/system/park-tarolo-utana@.service \
+        /etc/systemd/system/*.mount.wants/park-tarolo-utana@*.service
+    systemctl daemon-reload
+    udevadm control --reload-rules 2>/dev/null
+    ok "automatika kikapcsolva (a felcsatolt tárolók maradnak)"
+}
+
+case "${1:-lista}" in
+    lista|list)            parancs_lista ;;
+    auto)                  parancs_auto ;;
+    csatol|mount)          shift; parancs_csatol "${1:-}" ;;
+    lecsatol|umount)       shift; parancs_lecsatol "${1:-}" ;;
+    samba-frissit)         parancs_samba_frissit && ok "Samba megosztások frissítve" ;;
+    vedelem)               parancs_vedelem ;;
+    inditas)               shift; parancs_inditas "${1:-}" ;;
+    --telepit)             parancs_telepit ;;
+    --eltavolit)           parancs_eltavolit ;;
+    -h|--help|sugo)        sugo ;;
+    *)                     hiba "ismeretlen parancs: $1"; sugo; exit 1 ;;
+esac

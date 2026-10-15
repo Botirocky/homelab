@@ -1,0 +1,21 @@
+services:
+  tinyauth:
+    image: ghcr.io/tinyauthapp/tinyauth:v5
+    container_name: park-tinyauth
+    restart: unless-stopped
+    volumes:
+      - ./felhasznalok:/felhasznalok:ro
+    environment:
+      TZ: ${TZ}
+      TINYAUTH_APPURL: http://auth.${BELSO_DOMAIN}
+      TINYAUTH_AUTH_USERSFILE: /felhasznalok
+      TINYAUTH_AUTH_SECURECOOKIE: "false"
+      TINYAUTH_AUTH_TRUSTEDPROXIES: 172.16.0.0/12
+      TINYAUTH_AUTH_SESSIONEXPIRY: "604800"
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

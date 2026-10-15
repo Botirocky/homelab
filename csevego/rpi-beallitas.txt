@@ -1,0 +1,123 @@
+# Privát Csevegő átköltöztetése a picloud Raspberry Pi-re
+
+A cél: a chat-szerver a Pi-n fusson éjjel-nappal (3–5 W), Tailscale-en át,
+HTTPS-sel, és bekapcsolás/áramszünet után magától induljon.
+
+Új cím a végén:  https://picloud.pelda-tailnet.ts.net:8765
+
+---
+
+## 0. Előkészület (amikor bekapcsolod a Pi-t)
+
+A picloud 142 napja offline, ezért a Tailscale-kulcsa valószínűleg lejárt.
+Bekapcsolás után lépj be rá (monitorral vagy helyi hálózaton SSH-val), és:
+
+    sudo tailscale up --operator=$USER
+
+Ha kiír egy login-linket, nyisd meg és hagyd jóvá — utána a Pi újra él a
+tailnetben, és a többi lépés akár a nagygépről, SSH-n is mehet:
+
+    ssh <felhasznalo>@picloud
+
+## 1. Rendszer frissítése a Pi-n
+
+    sudo apt update && sudo apt full-upgrade -y
+
+## 2. Python-környezet
+
+A rendszercsomagban lévő websockets régi, ezért virtuális környezetbe
+telepítsd a frisset:
+
+    python3 -m venv ~/chat-venv
+    ~/chat-venv/bin/pip install websockets
+
+## 3. A projekt átmásolása (a CachyOS gépről futtatva)
+
+    rsync -av --exclude 'cert.pem' --exclude 'key.pem' --exclude 'graphify-out' \
+      ~/Dokumentumok/projectek/chat/ <felhasznalo>@picloud:~/chat/
+
+- A cert.pem/key.pem NEM megy át — az a botirocky-1 nevére szól, a Pi újat kér.
+- A chat_data/ (üzenet-előzmények) és a .admin_token átmegy, így a szobák
+  előzményei és az admin token ugyanazok maradnak. Ha új tokent akarsz,
+  töröld a Pi-n a ~/chat/.admin_token fájlt.
+
+## 4. HTTPS-tanúsítvány a Pi nevére
+
+    cd ~/chat
+    sudo tailscale cert --cert-file cert.pem --key-file key.pem picloud.pelda-tailnet.ts.net
+    sudo chown $USER: cert.pem key.pem && chmod 600 key.pem
+
+## 5. Automatikus indulás — systemd-szolgáltatás
+
+Fájl: /etc/systemd/system/csevego.service  (sudo nano-val)
+
+    [Unit]
+    Description=Privát Csevegő szerver
+    After=network-online.target tailscaled.service
+    Wants=network-online.target
+
+    [Service]
+    User=<felhasznalo>
+    WorkingDirectory=/home/<felhasznalo>/chat
+    ExecStart=/home/<felhasznalo>/chat-venv/bin/python3 server.py
+    Restart=on-failure
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+
+Aktiválás:
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now csevego.service
+    systemctl status csevego.service        # ellenőrzés
+
+## 6. Tanúsítvány-megújítás hetente (a szervert újra is indítja)
+
+Fájl: /etc/systemd/system/csevego-cert.service
+
+    [Unit]
+    Description=Csevegő tanúsítvány megújítása
+
+    [Service]
+    Type=oneshot
+    WorkingDirectory=/home/<felhasznalo>/chat
+    ExecStart=/usr/bin/tailscale cert --cert-file cert.pem --key-file key.pem picloud.pelda-tailnet.ts.net
+    ExecStartPost=/bin/chown <felhasznalo>: cert.pem key.pem
+    ExecStartPost=/bin/systemctl restart csevego.service
+
+Fájl: /etc/systemd/system/csevego-cert.timer
+
+    [Unit]
+    Description=Csevegő tanúsítvány-megújítás hetente
+
+    [Timer]
+    OnCalendar=weekly
+    Persistent=true
+
+    [Install]
+    WantedBy=timers.target
+
+Aktiválás:
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now csevego-cert.timer
+
+## 7. Ellenőrzés
+
+Bármelyik tailscale-es eszközödről (telefonról is):
+
+    https://picloud.pelda-tailnet.ts.net:8765
+
+Ha bejön a chat és a lakat-ikon zöld (nincs tanúsítvány-figyelmeztetés),
+minden rendben — az E2EE is működik.
+
+## 8. Takarítás a nagygépen (ha már minden a Pi-n fut)
+
+    systemctl --user disable --now csevego-cert.timer   # heti megújító leállítása
+    # és a nagygépen futó server.py leállítása
+
+---
+
+Tipp: ha a Pi online, az egészet el tudom végezni SSH-n keresztül is —
+csak kapcsold be, és szólj a Claude-nak. :)

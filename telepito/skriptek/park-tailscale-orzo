@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+ALLAPOT_DIR="${TS_ORZO_DIR:-/run/park-tailscale-orzo}"
+HIBA_FAJL="$ALLAPOT_DIR/hibak"
+UTOLSO_FAJL="$ALLAPOT_DIR/utolso-ujrainditas"
+HATAR="${TS_ORZO_HATAR:-3}"
+SZUNET="${TS_ORZO_SZUNET:-1800}"
+
+naplo() { logger -t park-tailscale-orzo "$*" 2>/dev/null; printf '%s\n' "$*"; }
+ertesit() { command -v park-ertesito >/dev/null 2>&1 && park-ertesito "$1" "$2" "${3:-figy}" >/dev/null 2>&1 || true; }
+
+mkdir -p "$ALLAPOT_DIR"
+systemctl is-active --quiet tailscaled || { naplo "tailscaled nem fut – nem nyúlok hozzá"; exit 0; }
+
+json="$(timeout 20 tailscale status --json 2>/dev/null)" || json=""
+allapot="$(printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("ismeretlen"); sys.exit()
+if d.get("BackendState") != "Running":
+    print("nem-fut:" + str(d.get("BackendState"))); sys.exit()
+h = " ".join(d.get("Health") or [])
+print("vezerlo-hiba" if "coordination server" in h else "ok")
+')"
+
+case "$allapot" in
+    ok)
+        if [[ -s "$HIBA_FAJL" && "$(cat "$HIBA_FAJL")" != 0 ]]; then
+            naplo "a vezérlő-kapcsolat helyreállt"
+        fi
+        echo 0 > "$HIBA_FAJL"
+        exit 0 ;;
+    nem-fut:NeedsLogin|nem-fut:NeedsMachineAuth|nem-fut:Stopped)
+        naplo "tailscale állapota: ${allapot#nem-fut:} – újraindítás nem segít, kihagyom"
+        exit 0 ;;
+esac
+
+hibak=$(( $(cat "$HIBA_FAJL" 2>/dev/null || echo 0) + 1 ))
+echo "$hibak" > "$HIBA_FAJL"
+naplo "hiba ($allapot), egymás után $hibak. alkalommal"
+(( hibak >= HATAR )) || exit 0
+
+most=$(date +%s)
+utolso=$(cat "$UTOLSO_FAJL" 2>/dev/null || echo 0)
+if (( most - utolso < SZUNET )); then
+    naplo "nemrég volt újraindítás, most kivárok"
+    exit 0
+fi
+
+echo "$most" > "$UTOLSO_FAJL"
+echo 0 > "$HIBA_FAJL"
+if systemctl restart tailscaled; then
+    naplo "tailscaled újraindítva ($allapot)"
+    ertesit "Tailscale újraindítva" "A picloud elvesztette a kapcsolatot a Tailscale vezérlőszerverével ($allapot), ezért a tailscaled újraindult." figy
+else
+    naplo "tailscaled újraindítása SIKERTELEN"
+    ertesit "Tailscale hiba" "A tailscaled újraindítása nem sikerült a picloudon." hiba
+fi

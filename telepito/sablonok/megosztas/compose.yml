@@ -1,0 +1,32 @@
+services:
+  privatebin:
+    image: privatebin/nginx-fpm-alpine:latest
+    container_name: park-privatebin
+    restart: unless-stopped
+    read_only: true
+    ports:
+      - "8103:8080"
+    volumes:
+      - ${ADAT_DIR}/privatebin:/srv/data
+      - ./privatebin.php:/srv/cfg/conf.php:ro
+    environment:
+      TZ: ${TZ}
+    mem_limit: 128m
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+  excalidraw:
+    image: excalidraw/excalidraw:latest
+    container_name: park-excalidraw
+    restart: unless-stopped
+    ports:
+      - "8104:80"
+    mem_limit: 64m
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

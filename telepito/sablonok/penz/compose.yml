@@ -1,0 +1,18 @@
+services:
+  actual:
+    image: actualbudget/actual-server:latest
+    container_name: park-actual
+    restart: unless-stopped
+    ports:
+      - "5006:5006"
+    volumes:
+      - ${ADAT_DIR}/actual:/data
+    environment:
+      TZ: ${TZ}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

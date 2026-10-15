@@ -1,0 +1,12 @@
+.env
+*.env
+!*.env.pelda
+titkok.h
+titkok.py
+szerver_kijelzo.txt
+.admin_token
+__pycache__/
+build/
+.pio/
+*.bin
+*.iso

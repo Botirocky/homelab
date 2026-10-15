@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PARK_DIR="${PARK_DIR:-/srv/szerverpark}"
+[[ -r /etc/szerverpark.conf ]] && source /etc/szerverpark.conf
+STACKEK="${PARK_DIR}/stackek"
+ADAT_DIR="${ADAT_DIR:-${PARK_DIR}/adat}"
+ENV_FAJL="${PARK_DIR}/.env"
+[[ -f "$ENV_FAJL" ]] && { set -a; source "$ENV_FAJL"; set +a; }
+
+sugo() {
+    cat <<'SUGO'
+park-egeszseg – a szerverpark egészség-ellenőrzése kilépési kóddal.
+Kilépési kód: 0=OK, 1=figyelmeztetés, 2=hiba.
+
+  park-egeszseg              teljes jelentés + kilépési kód
+  park-egeszseg --csendes    csak akkor ír, ha van gond (cronhoz)
+  park-egeszseg --json       gépi feldolgozásra
+  park-egeszseg --ertesit    gond esetén park-ertesito-val is riaszt
+SUGO
+}
+
+# A park- előtagú konténereken kívül azokat is figyeljük, amiket az
+# ORZO_EXTRA felsorol. Így a külön telepített dolgok (pl. a Pi-hole saját
+# compose-ból) sem maradnak ki – enélkül egy leállt Pi-hole DNS nélkül hagyja
+# a hálózatot, és senki nem indítja újra.
+konteneterek_listaja() {
+    docker ps -a --filter 'name=park-' --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null
+    local c
+    for c in ${ORZO_EXTRA:-}; do
+        docker ps -a --filter "name=^${c}$" --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null
+    done
+}
+
+CSENDES=0; JSON=0; ERTESIT=0
+for a in "$@"; do
+    case "$a" in
+        --csendes) CSENDES=1 ;;
+        --json)    JSON=1 ;;
+        --ertesit) ERTESIT=1 ;;
+        -h|--help) sugo; exit 0 ;;
+        *) echo "Ismeretlen kapcsoló: $a" >&2; exit 1 ;;
+    esac
+done
+
+if [[ -t 1 && $JSON -eq 0 ]]; then
+    Z=$'\e[32m'; S=$'\e[33m'; P=$'\e[31m'; K=$'\e[36m'; N=$'\e[0m'; G=$'\e[90m'
+else Z=""; S=""; P=""; K=""; N=""; G=""; fi
+
+GEP="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo szerver)"
+
+szint=0
+gondok=()
+emel() { (( $1 > szint )) && szint=$1; return 0; }
+baj()  { emel "$1"; gondok+=("$2"); }
+
+sorok=()
+sor()  { sorok+=("$1"); }
+
+if command -v docker >/dev/null 2>&1; then
+    fut_db=0; baj_db=0
+    while IFS='|' read -r nev state status; do
+        [[ -n "$nev" ]] || continue
+        fut_db=$((fut_db+1))
+        health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$nev" 2>/dev/null || true)"
+        if [[ "$state" != "running" ]]; then
+            baj 2 "konténer áll: $nev ($state)"; baj_db=$((baj_db+1))
+            sor "  ${P}✘${N} $nev — $state"
+        elif [[ "$health" == "unhealthy" ]]; then
+            baj 2 "konténer egészségtelen: $nev"; baj_db=$((baj_db+1))
+            sor "  ${P}✘${N} $nev — egészségtelen"
+        elif [[ "$status" == Restarting* ]]; then
+            baj 2 "konténer újraindulgat: $nev"; baj_db=$((baj_db+1))
+            sor "  ${P}✘${N} $nev — újraindulgat"
+        fi
+    done < <(konteneterek_listaja)
+    if (( fut_db == 0 )); then
+        baj 1 "egyetlen park- konténer sem található"
+        sor "  ${S}!${N} nincs park- konténer"
+    elif (( baj_db == 0 )); then
+        sor "  ${Z}✔${N} mind a(z) $fut_db konténer fut"
+    fi
+else
+    sor "  ${G}docker nincs telepítve${N}"
+fi
+
+mar_latott=""
+lemez_ell() {
+    local ut="$1"
+    [[ -n "$ut" && -e "$ut" ]] || return 0
+    local sor_df forras pct cel
+    sor_df="$(df -P "$ut" 2>/dev/null | tail -1)" || return 0
+    forras="$(awk '{print $1}' <<<"$sor_df")"
+    pct="$(awk '{print $5}' <<<"$sor_df" | tr -dc '0-9')"
+    cel="$(awk '{print $6}' <<<"$sor_df")"
+    case " $mar_latott " in *" $forras "*) return 0 ;; esac
+    mar_latott+=" $forras"
+    [[ -n "$pct" ]] || return 0
+    if   (( pct >= 95 )); then baj 2 "lemez tele: $cel ${pct}%"; sor "  ${P}✘${N} $cel — ${pct}%"
+    elif (( pct >= 85 )); then baj 1 "lemez fogytán: $cel ${pct}%"; sor "  ${S}!${N} $cel — ${pct}%"
+    else sor "  ${Z}✔${N} $cel — ${pct}%"; fi
+}
+lemez_ell "$PARK_DIR"
+lemez_ell "$ADAT_DIR"
+lemez_ell "${MENTES_CEL:-}"
+
+if [[ -r /proc/meminfo ]]; then
+    memtotal="$(awk '/^MemTotal:/{print $2}' /proc/meminfo)"
+    memavail="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)"
+    swtotal="$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)"
+    swfree="$(awk '/^SwapFree:/{print $2}' /proc/meminfo)"
+    if [[ -n "$memtotal" && "$memtotal" -gt 0 ]]; then
+        hasznalt=$(( (memtotal - memavail) * 100 / memtotal ))
+        if   (( hasznalt >= 95 )); then baj 2 "memória szűkös: ${hasznalt}%"; sor "  ${P}✘${N} RAM — ${hasznalt}%"
+        elif (( hasznalt >= 90 )); then baj 1 "memória fogytán: ${hasznalt}%"; sor "  ${S}!${N} RAM — ${hasznalt}%"
+        else sor "  ${Z}✔${N} RAM — ${hasznalt}%"; fi
+    fi
+    if [[ -n "${swtotal:-}" && "$swtotal" -gt 0 ]]; then
+        swhaszn=$(( (swtotal - swfree) * 100 / swtotal ))
+        (( swhaszn >= 60 )) && { baj 1 "swap terhelt: ${swhaszn}%"; sor "  ${S}!${N} swap — ${swhaszn}%"; }
+    fi
+fi
+if [[ -r /proc/loadavg ]]; then
+    load1="$(cut -d' ' -f1 /proc/loadavg)"
+    magok="$(nproc 2>/dev/null || echo 1)"
+    terheles_egesz="$(awk -v l="$load1" 'BEGIN{printf "%d", l*100}')"
+    if (( terheles_egesz > magok * 200 )); then
+        baj 1 "magas terhelés: load ${load1} / ${magok} mag"
+        sor "  ${S}!${N} terhelés — ${load1} (${magok} mag)"
+    else
+        sor "  ${Z}✔${N} terhelés — ${load1} (${magok} mag)"
+    fi
+fi
+
+if command -v restic >/dev/null 2>&1 && [[ -n "${MENTES_CEL:-}" && -n "${RESTIC_JELSZO:-}" ]]; then
+    utolso="$(RESTIC_PASSWORD="$RESTIC_JELSZO" restic -r "$MENTES_CEL" snapshots --latest 1 --json 2>/dev/null \
+              | grep -o '"time":"[^"]*"' | tail -1 | cut -d'"' -f4 || true)"
+    if [[ -n "$utolso" ]]; then
+        mikor="$(date -d "$utolso" +%s 2>/dev/null || echo 0)"
+        most="$(date +%s)"
+        ora=$(( (most - mikor) / 3600 ))
+        if   (( ora >= 48 )); then baj 2 "mentés régi: ${ora} órája"; sor "  ${P}✘${N} mentés — ${ora} órája"
+        elif (( ora >= 26 )); then baj 1 "mentés elavulóban: ${ora} órája"; sor "  ${S}!${N} mentés — ${ora} órája"
+        else sor "  ${Z}✔${N} mentés — ${ora} órája"; fi
+    else
+        baj 1 "nincs mentési pillanatkép a tárolóban"
+        sor "  ${S}!${N} mentés — nincs pillanatkép"
+    fi
+    if command -v systemctl >/dev/null 2>&1 && ! systemctl is-enabled park-mentes.timer >/dev/null 2>&1; then
+        baj 1 "a park-mentes.timer nincs bekapcsolva"
+        sor "  ${S}!${N} mentés-időzítő — kikapcsolva"
+    fi
+fi
+
+if [[ -f /etc/szerverpark-tars.conf ]]; then
+    source /etc/szerverpark-tars.conf
+    cel="${PI_IP:-${PI_HOST_MENTETT:-}}"
+    if [[ -n "$cel" ]]; then
+        if ping -c1 -W2 "$cel" >/dev/null 2>&1; then
+            sor "  ${Z}✔${N} társgép ($cel) elérhető"
+        else
+            baj 1 "a társgép nem válaszol: $cel"
+            sor "  ${S}!${N} társgép ($cel) — nem válaszol"
+        fi
+    fi
+fi
+
+case "$szint" in
+    0) allapot="ok";   szszin="$Z"; szszo="RENDBEN" ;;
+    1) allapot="figy"; szszin="$S"; szszo="FIGYELMEZTETÉS" ;;
+    2) allapot="hiba"; szszin="$P"; szszo="HIBA" ;;
+esac
+
+if (( JSON == 1 )); then
+    printf '{"gep":"%s","szint":%d,"allapot":"%s","ido":%d,"gondok":[' "$GEP" "$szint" "$allapot" "$(date +%s)"
+    for i in "${!gondok[@]}"; do
+        g="${gondok[$i]}"; g="${g//\\/\\\\}"; g="${g//\"/\\\"}"
+        (( i > 0 )) && printf ','
+        printf '"%s"' "$g"
+    done
+    printf ']}\n'
+elif (( CSENDES == 0 || szint > 0 )); then
+    printf '\n%s╭─ park-egeszseg · %s ─ %s%s%s\n' "$K" "$GEP" "$szszin" "$szszo" "$N"
+    for s in "${sorok[@]}"; do printf '%s\n' "$s"; done
+    printf '%s╰─ állapot: %s%s%s\n\n' "$K" "$szszin" "$szszo" "$N"
+fi
+
+if (( ERTESIT == 1 && szint > 0 )) && command -v park-ertesito >/dev/null 2>&1; then
+    prio="figy"; (( szint == 2 )) && prio="hiba"
+    uz="$(printf '%s\n' "${gondok[@]}")"
+    park-ertesito "Szerverpark: $szszo" "$uz" "$prio" >/dev/null 2>&1 || true
+fi
+
+exit "$szint"

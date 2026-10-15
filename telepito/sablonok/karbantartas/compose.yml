@@ -1,0 +1,57 @@
+# Karbantartás: automatikus konténer-frissítés, naplók, sebességmérés.
+services:
+  watchtower:
+    image: nickfedor/watchtower:latest
+    container_name: park-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      TZ: ${TZ}
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      WATCHTOWER_SCHEDULE: "0 30 4 * * 0"
+      WATCHTOWER_NOTIFICATION_URL: ${WATCHTOWER_NTFY:-}
+      WATCHTOWER_NOTIFICATIONS_HOSTNAME: ${GEPNEV:-park}
+    networks: [park]
+
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: park-dozzle
+    restart: unless-stopped
+    ports:
+      - "8085:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      TZ: ${TZ}
+      DOZZLE_NO_ANALYTICS: "true"
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+  speedtest:
+    image: lscr.io/linuxserver/speedtest-tracker:latest
+    container_name: park-speedtest
+    restart: unless-stopped
+    ports:
+      - "8086:80"
+    volumes:
+      - ${ADAT_DIR}/speedtest:/config
+    environment:
+      TZ: ${TZ}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      APP_KEY: ${SPEEDTEST_APP_KEY}
+      APP_URL: http://sebesseg.${BELSO_DOMAIN}
+      DB_CONNECTION: sqlite
+      SPEEDTEST_SCHEDULE: "0 */3 * * *"
+      DISPLAY_TIMEZONE: ${TZ}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

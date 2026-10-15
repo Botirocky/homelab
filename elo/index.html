@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>picloud élőben</title>
+<style>
+:root{
+  --bg:#07090d;--panel:#0d1118;--panel2:#111722;--line:#1c2433;--txt:#d7dee9;--dim:#6b778a;
+  --kek:#4aa8ff;--zold:#3ddc97;--piros:#ff4d5e;--sarga:#ffb547;--lila:#b48cff;
+  --mono:ui-monospace,"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Inter,Roboto,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--sans);overflow:hidden}
+body{display:grid;grid-template-rows:auto 1fr auto;height:100vh}
+header{display:flex;align-items:center;gap:18px;padding:12px 18px;border-bottom:1px solid var(--line);background:linear-gradient(#0b0f16,#080b10)}
+.logo{display:flex;align-items:center;gap:10px;font-weight:650;letter-spacing:.2px}
+.pulzus{width:10px;height:10px;border-radius:50%;background:var(--zold);box-shadow:0 0 0 0 rgba(61,220,151,.6);animation:pulzus 2s infinite}
+.pulzus.halott{background:var(--piros);animation:none}
+@keyframes pulzus{0%{box-shadow:0 0 0 0 rgba(61,220,151,.55)}70%{box-shadow:0 0 0 10px rgba(61,220,151,0)}100%{box-shadow:0 0 0 0 rgba(61,220,151,0)}}
+.logo small{color:var(--dim);font-weight:400;font-family:var(--mono);font-size:12px}
+.fej-adat{display:flex;gap:22px;margin-left:auto;font-family:var(--mono);font-size:12.5px;color:var(--dim)}
+.fej-adat b{color:var(--txt);font-weight:500}
+.gombok{display:flex;gap:8px}
+button{font:inherit;font-size:13px;color:var(--txt);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 12px;cursor:pointer;transition:.15s}
+button:hover{border-color:#2d3a50;background:#162030}
+button:disabled{opacity:.45;cursor:default}
+button.piros{border-color:#5a1f28;color:#ffb3ba}
+button.piros:hover{background:#2a1218}
+main{display:grid;grid-template-columns:270px 1fr 300px;min-height:0}
+aside{background:var(--panel);border-right:1px solid var(--line);padding:14px;overflow:auto;min-height:0}
+aside.jobb{border-right:0;border-left:1px solid var(--line)}
+h2{font-size:11px;letter-spacing:1.4px;text-transform:uppercase;color:var(--dim);font-weight:600;margin:4px 0 10px;display:flex;justify-content:space-between}
+h2 span{font-family:var(--mono);letter-spacing:0;text-transform:none}
+.rack{display:flex;flex-direction:column;gap:3px;padding:8px;background:#0a0d12;border:1px solid var(--line);border-radius:6px}
+.penge{display:grid;grid-template-columns:8px 8px 1fr auto;align-items:center;gap:7px;height:22px;padding:0 8px;background:linear-gradient(#141b26,#0f141d);border:1px solid #1a2230;border-radius:3px;font-family:var(--mono);font-size:11.5px}
+.penge .nev{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#b9c4d4}
+.penge .cpu{color:var(--dim);font-size:10.5px}
+.led{width:7px;height:7px;border-radius:50%;background:#1f2a1f}
+.led.ok{background:var(--zold);box-shadow:0 0 6px var(--zold)}
+.led.indul{background:var(--sarga);box-shadow:0 0 6px var(--sarga);animation:villog .6s infinite}
+.led.beteg,.led.all{background:var(--piros);box-shadow:0 0 6px var(--piros)}
+.led.akt{background:#0f2a1c}
+.led.akt.be{background:var(--kek);box-shadow:0 0 6px var(--kek)}
+@keyframes villog{50%{opacity:.25}}
+.szinpad{position:relative;min-height:0}
+.szinpad canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.jelmagyarazat{position:absolute;left:16px;bottom:14px;display:flex;gap:14px;font-size:12px;color:var(--dim);background:rgba(7,9,13,.7);padding:7px 11px;border-radius:8px;border:1px solid var(--line)}
+.jelmagyarazat i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.felirat{position:absolute;top:16px;left:50%;transform:translateX(-50%);font-size:13px;color:var(--dim);text-align:center;pointer-events:none}
+.felirat b{display:block;font-size:30px;color:var(--txt);font-family:var(--mono);font-weight:500;letter-spacing:-.5px}
+.mero{margin-bottom:14px}
+.mero .sor{display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:5px}
+.mero .sor b{font-family:var(--mono);font-weight:500}
+.savos{height:6px;background:#0a0d12;border-radius:4px;overflow:hidden;border:1px solid var(--line)}
+.savos i{display:block;height:100%;width:0;background:var(--kek);transition:width .6s,background .6s}
+.magok{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:6px}
+.mag{height:28px;background:#0a0d12;border:1px solid var(--line);border-radius:3px;position:relative;overflow:hidden}
+.mag i{position:absolute;left:0;right:0;bottom:0;background:linear-gradient(var(--kek),#1f5ea0);transition:height .5s}
+.diagram{width:100%;height:70px;display:block;background:#0a0d12;border:1px solid var(--line);border-radius:6px}
+.kartyak{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+.kartya{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px}
+.kartya small{display:block;color:var(--dim);font-size:11px;margin-bottom:3px}
+.kartya b{font-family:var(--mono);font-size:19px;font-weight:500}
+.kartya.piros b{color:var(--piros)}
+.toplista{list-style:none;font-family:var(--mono);font-size:11.5px}
+.toplista li{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px dashed #19202c}
+.toplista li span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ffb3ba}
+.toplista li span:last-child{color:var(--dim)}
+footer{border-top:1px solid var(--line);background:var(--panel);height:34px;overflow:hidden;position:relative;font-family:var(--mono);font-size:12px}
+.szalag{position:absolute;top:0;left:0;height:100%;display:flex;align-items:center;gap:26px;white-space:nowrap;padding-left:100%;will-change:transform}
+.szalag span{color:var(--dim)}
+.szalag span.blokk{color:var(--piros)}
+.szalag span.cache{color:var(--zold)}
+.szalag span.net{color:var(--sarga)}
+.szalag span.helyi{color:var(--lila)}
+.toast{position:fixed;top:70px;left:50%;transform:translate(-50%,-20px);opacity:0;background:#1a2230;border:1px solid #2d3a50;padding:10px 16px;border-radius:10px;font-size:14px;transition:.3s;pointer-events:none;z-index:9}
+.toast.lat{opacity:1;transform:translate(-50%,0)}
+button.kek{border-color:#1f4a78;color:#bfe0ff}
+button.kek:hover{background:#10243a}
+.wifi-hatter{position:fixed;inset:0;background:rgba(3,5,8,.78);backdrop-filter:blur(6px);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
+.wifi-hatter.lat{display:flex}
+.wifi-ablak{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:28px;display:grid;grid-template-columns:auto 1fr;gap:28px;max-width:760px;width:100%;box-shadow:0 30px 80px rgba(0,0,0,.6);position:relative}
+.wifi-qr{background:#fff;border-radius:12px;padding:14px;width:300px;height:300px;display:flex;align-items:center;justify-content:center}
+.wifi-qr svg{width:100%;height:100%;display:block}
+.wifi-qr svg rect[fill="#ffffff"],.wifi-qr svg rect[style*="fill:#ffffff"]{fill:#fff}
+.wifi-info h3{font-size:22px;font-weight:650;margin-bottom:4px}
+.wifi-info .al{color:var(--dim);font-size:13.5px;margin-bottom:18px}
+.adatsor{display:flex;justify-content:space-between;align-items:center;gap:10px;background:#0a0d12;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px}
+.adatsor small{color:var(--dim);font-size:11px;display:block}
+.adatsor b{font-family:var(--mono);font-size:17px;font-weight:500;word-break:break-all}
+.adatsor button{padding:5px 9px;font-size:12px}
+.lepesek{list-style:none;counter-reset:l;margin-top:16px;font-size:13.5px;color:#b9c4d4}
+.lepesek li{counter-increment:l;display:flex;gap:10px;margin-bottom:9px;line-height:1.4}
+.lepesek li::before{content:counter(l);flex:none;width:21px;height:21px;border-radius:50%;background:#10243a;color:var(--kek);font:600 12px var(--mono);display:flex;align-items:center;justify-content:center}
+.wifi-allapot{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:13px;color:var(--dim)}
+.wifi-allapot b{color:var(--txt);font-family:var(--mono)}
+.wifi-bezar{position:absolute;top:12px;right:12px;border:0;background:transparent;font-size:20px;color:var(--dim);padding:4px 10px}
+@media (max-width:720px){.wifi-ablak{grid-template-columns:1fr;justify-items:center;padding:20px}.wifi-qr{width:240px;height:240px}}
+@media (max-width:1100px){main{grid-template-columns:1fr}aside{display:none}.fej-adat{display:none}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><div class="pulzus" id="pulzus"></div>picloud <small>élő szerverterem</small></div>
+  <div class="fej-adat">
+    <div>üzemidő <b id="uptime">–</b></div>
+    <div>terhelés <b id="load">–</b></div>
+    <div>ventilátor <b id="vent">–</b></div>
+    <div><b id="ora">–</b></div>
+  </div>
+  <div class="gombok">
+    <button class="kek" id="g-wifi" title="QR-kód a picloud-net wifihez">Csatlakozz a wifihez</button>
+    <button class="piros" id="g-reklam" title="A szerver 30 ismert reklám/követő domaint kérdez le a saját Pi-hole-jától">Reklám-eső</button>
+    <button id="g-terheles" title="12 másodpercig minden CPU-mag 100%-on (legalacsonyabb prioritással)">Stresszteszt</button>
+    <button id="g-teljes">⛶</button>
+  </div>
+</header>
+<main>
+  <aside>
+    <h2>Konténerek <span id="kont-db">–</span></h2>
+    <div class="rack" id="rack"></div>
+  </aside>
+  <section class="szinpad">
+    <canvas id="vaszon"></canvas>
+    <div class="felirat"><b id="qpm">0</b>DNS-kérés / perc</div>
+    <div class="jelmagyarazat">
+      <span><i style="background:var(--piros)"></i>blokkolva</span>
+      <span><i style="background:var(--zold)"></i>gyorsítótárból</span>
+      <span><i style="background:var(--sarga)"></i>internetről</span>
+      <span><i style="background:var(--lila)"></i>helyi (park.lan)</span>
+    </div>
+  </section>
+  <aside class="jobb">
+    <h2>Pi-hole</h2>
+    <div class="kartyak">
+      <div class="kartya"><small>kérés ma</small><b id="ossz">–</b></div>
+      <div class="kartya piros"><small>blokkolva</small><b id="blokk">–</b></div>
+      <div class="kartya"><small>blokk-arány</small><b id="szazalek">–</b></div>
+      <div class="kartya"><small>tiltólista</small><b id="lista">–</b></div>
+    </div>
+    <h2>Raspberry Pi 4</h2>
+    <div class="mero"><div class="sor"><span>CPU</span><b id="cpu">–</b></div><div class="savos"><i id="cpu-s"></i></div>
+      <div class="magok" id="magok"></div></div>
+    <div class="mero"><div class="sor"><span>Hőmérséklet</span><b id="hom">–</b></div><div class="savos"><i id="hom-s"></i></div></div>
+    <div class="mero"><div class="sor"><span>Memória</span><b id="ram">–</b></div><div class="savos"><i id="ram-s"></i></div></div>
+    <h2>Hálózat <span id="halo">–</span></h2>
+    <canvas class="diagram" id="halo-d"></canvas>
+    <h2 style="margin-top:16px">Most blokkolt <span>élő</span></h2>
+    <ul class="toplista" id="toplista"></ul>
+  </aside>
+</main>
+<footer><div class="szalag" id="szalag"></div></footer>
+<div class="toast" id="toast"></div>
+<div class="wifi-hatter" id="wifi">
+  <div class="wifi-ablak" role="dialog" aria-label="Csatlakozás a wifihez">
+    <button class="wifi-bezar" id="wifi-bezar" aria-label="Bezárás">✕</button>
+    <div class="wifi-qr" id="wifi-qr"></div>
+    <div class="wifi-info">
+      <h3>Csatlakozz a picloudhoz</h3>
+      <div class="al">Olvasd be a kódot a telefonod kamerájával – a wifit maga a Raspberry Pi sugározza.</div>
+      <div class="adatsor"><div><small>Hálózat</small><b id="wifi-ssid">–</b></div></div>
+      <div class="adatsor"><div><small>Jelszó</small><b id="wifi-jelszo">••••••••</b></div><button id="wifi-mutat">mutat</button></div>
+      <ol class="lepesek">
+        <li>Olvasd be a QR-kódot, és fogadd el a csatlakozást.</li>
+        <li>Megnyílik a picloud portál: add meg az e-mail címedet.</li>
+        <li><span>A gazda jóváhagyja – utána nyisd meg az <b>elo.park.lan</b> címet, és nézd meg a saját telefonodat a térképen.</span></li>
+      </ol>
+      <div class="wifi-allapot"><span class="pulzus" id="wifi-pont"></span><span>Most <b id="wifi-db">–</b> eszköz van a picloud-net-en</span></div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const SZIN = {blokk:'#ff4d5e', cache:'#3ddc97', net:'#ffb547', helyi:'#b48cff', ki:'#4aa8ff'};
+const vaszon = $('vaszon'), ctx = vaszon.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+const kliensek = new Map();
+const reszecskek = [], robbanasok = [], feliratok = [];
+const csillagok = Array.from({length: 90}, () => ({x: Math.random(), y: Math.random(), r: Math.random() * 1.2 + .2, f: Math.random() * 6}));
+const percablak = [];
+const blokkSzamlalo = new Map();
+let pi = {x: 0, y: 0}, net = {x: 0, y: 0}, pajzsVillanas = 0, piVillanas = 0, cpuMost = 0;
+
+function meretez() {
+  const r = vaszon.getBoundingClientRect();
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = r.width; H = r.height;
+  vaszon.width = W * DPR; vaszon.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  pi = {x: W * .52, y: H * .52};
+  net = {x: W * .9, y: H * .5};
+  elrendez();
+}
+addEventListener('resize', meretez);
+
+function elrendez() {
+  const lista = [...kliensek.values()].sort((a, b) => a.nev.localeCompare(b.nev));
+  const n = lista.length;
+  lista.forEach((k, i) => {
+    const sz = n === 1 ? 0 : (-0.95 + 1.9 * i / (n - 1));
+    const R = Math.min(W * .38, H * .42);
+    k.cx = pi.x - Math.cos(sz) * R * 1.05;
+    k.cy = pi.y + Math.sin(sz) * R;
+    if (k.x === undefined) { k.x = k.cx - 40; k.y = k.cy; }
+  });
+}
+
+function kliens(nev) {
+  let k = kliensek.get(nev);
+  if (!k) {
+    k = {nev, akt: 0, db: 0, utolso: performance.now(), uj: 1};
+    kliensek.set(nev, k);
+    if (kliensek.size > 14) {
+      const legregebbi = [...kliensek.values()].sort((a, b) => a.utolso - b.utolso)[0];
+      kliensek.delete(legregebbi.nev);
+    }
+    elrendez();
+  }
+  k.utolso = performance.now();
+  return k;
+}
+
+function rovidNev(n) {
+  n = String(n || '?');
+  if (n === '127.0.0.1' || n === 'localhost' || n === 'pi.hole') return 'picloud';
+  return n.replace(/\.(hotspot\.lan|home|lan|local)$/, '').slice(0, 18);
+}
+
+function bezier(a, b, c, t) {
+  const u = 1 - t;
+  return {x: u * u * a.x + 2 * u * t * b.x + t * t * c.x, y: u * u * a.y + 2 * u * t * b.y + t * t * c.y};
+}
+
+function indit(q, kesleltetes) {
+  const k = kliens(rovidNev(q.kl));
+  k.db++;
+  reszecskek.push({k, q, fazis: 0, t: -kesleltetes, seb: .018 + Math.random() * .01, kanyar: (Math.random() - .5) * 80});
+}
+
+function rajzolPi() {
+  const {x, y} = pi;
+  const g = ctx.createRadialGradient(x, y, 10, x, y, 120);
+  g.addColorStop(0, `rgba(74,168,255,${.10 + piVillanas * .25 + cpuMost / 400})`);
+  g.addColorStop(1, 'rgba(74,168,255,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 120, 0, 7); ctx.fill();
+  ctx.save(); ctx.translate(x, y);
+  ctx.fillStyle = '#0f3d24'; ctx.strokeStyle = '#2b8a57'; ctx.lineWidth = 1.5;
+  rrect(-46, -32, 92, 64, 6); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#c9ced6'; rrect(-12, -12, 26, 24, 2); ctx.fill();
+  ctx.fillStyle = '#1b1f26'; rrect(-38, -24, 18, 14, 1); ctx.fill(); rrect(20, -26, 22, 10, 1); ctx.fill();
+  ctx.fillStyle = '#c9a227';
+  for (let i = 0; i < 20; i++) { ctx.fillRect(-40 + i * 4.2, -30, 2, 2); ctx.fillRect(-40 + i * 4.2, -26.5, 2, 2); }
+  ctx.fillStyle = '#9aa3ae'; rrect(30, -4, 18, 14, 1); ctx.fill(); rrect(30, 13, 18, 13, 1); ctx.fill();
+  ctx.fillStyle = ['#3ddc97', '#ff4d5e'][(performance.now() / 300 | 0) % 2 && cpuMost > 30 ? 1 : 0];
+  ctx.beginPath(); ctx.arc(-38, 24, 2.2, 0, 7); ctx.fill();
+  ctx.restore();
+  ctx.font = '600 13px ' + getComputedStyle(document.body).getPropertyValue('--sans');
+  ctx.fillStyle = '#d7dee9'; ctx.textAlign = 'center'; ctx.fillText('picloud', x, y + 54);
+  ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = '#6b778a'; ctx.fillText('Pi-hole · 192.168.1.185', x, y + 69);
+  const pr = 66 + pajzsVillanas * 6;
+  ctx.strokeStyle = `rgba(255,77,94,${.18 + pajzsVillanas * .7})`; ctx.lineWidth = 2 + pajzsVillanas * 3;
+  ctx.beginPath(); ctx.arc(x, y, pr, Math.PI * .62, Math.PI * 1.38); ctx.stroke();
+}
+
+function rajzolNet() {
+  const {x, y} = net;
+  ctx.save(); ctx.translate(x, y);
+  ctx.fillStyle = '#121a26'; ctx.strokeStyle = '#2a3850'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(-18, 6, 18, Math.PI * .5, Math.PI * 1.5); ctx.arc(-2, -10, 20, Math.PI, Math.PI * 1.85);
+  ctx.arc(20, 0, 16, Math.PI * 1.4, Math.PI * .5); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = '#6b778a'; ctx.font = '12px ui-monospace,monospace'; ctx.textAlign = 'center';
+  ctx.fillText('internet', x, y + 44);
+  ctx.fillStyle = '#3e4a5c'; ctx.font = '10.5px ui-monospace,monospace'; ctx.fillText('Cloudflare · Quad9', x, y + 58);
+}
+
+function rajzolKliens(k, most) {
+  k.x += (k.cx - k.x) * .08; k.y += (k.cy - k.y) * .08;
+  k.akt *= .94; k.uj *= .97;
+  const kor = 15 + Math.min(k.akt, 6) * 1.5;
+  ctx.strokeStyle = 'rgba(74,168,255,.08)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(k.x, k.y); ctx.lineTo(pi.x, pi.y); ctx.stroke();
+  ctx.fillStyle = `rgba(74,168,255,${.08 + Math.min(k.akt, 5) * .05})`;
+  ctx.beginPath(); ctx.arc(k.x, k.y, kor + 8, 0, 7); ctx.fill();
+  ctx.fillStyle = '#0f1520'; ctx.strokeStyle = k.uj > .3 ? `rgba(61,220,151,${k.uj})` : '#2a3850'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(k.x, k.y, 13, 0, 7); ctx.fill(); ctx.stroke();
+  ikon(k);
+  ctx.textAlign = 'right'; ctx.font = '12px ui-monospace,monospace'; ctx.fillStyle = '#b9c4d4';
+  ctx.fillText(k.nev, k.x - 22, k.y + 1);
+  ctx.fillStyle = '#4b5669'; ctx.font = '10.5px ui-monospace,monospace';
+  ctx.fillText(k.db + ' kérés', k.x - 22, k.y + 15);
+}
+
+function ikon(k) {
+  const n = k.nev.toLowerCase();
+  ctx.save(); ctx.translate(k.x, k.y); ctx.strokeStyle = '#7fb6ef'; ctx.lineWidth = 1.4; ctx.beginPath();
+  if (/phone|iphone|android|galaxy|redmi|xiaomi|pixel|telefon/.test(n)) { rrect(-4, -7, 8, 14, 2); ctx.moveTo(-1, 4.5); ctx.lineTo(1, 4.5); }
+  else if (/picloud|szerver|pi|esp|pico|feather/.test(n)) { rrect(-6, -5, 12, 4, 1); rrect(-6, 1, 12, 4, 1); }
+  else { rrect(-6, -5, 12, 8, 1); ctx.moveTo(-8, 6); ctx.lineTo(8, 6); }
+  ctx.stroke(); ctx.restore();
+}
+
+function rrect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+
+function lepesReszecske(p) {
+  p.t += p.seb;
+  if (p.t < 0) return true;
+  const k = p.k;
+  let a, b, szin;
+  if (p.fazis === 0) { a = k; b = pi; szin = SZIN.ki; }
+  else if (p.fazis === 1) { a = pi; b = net; szin = SZIN.net; }
+  else if (p.fazis === 2) { a = net; b = pi; szin = SZIN.net; }
+  else { a = pi; b = k; szin = SZIN[p.q.sors] || SZIN.cache; }
+  const kozep = {x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 + p.kanyar};
+  const t = Math.min(p.t, 1);
+  const pos = bezier(a, kozep, b, t);
+  for (let i = 0; i < 6; i++) {
+    const tt = Math.max(0, t - i * .025);
+    const pp = bezier(a, kozep, b, tt);
+    ctx.fillStyle = szin + Math.round((1 - i / 6) * 120).toString(16).padStart(2, '0');
+    ctx.beginPath(); ctx.arc(pp.x, pp.y, 3 - i * .35, 0, 7); ctx.fill();
+  }
+  ctx.fillStyle = szin; ctx.shadowColor = szin; ctx.shadowBlur = 12;
+  ctx.beginPath(); ctx.arc(pos.x, pos.y, 3.2, 0, 7); ctx.fill(); ctx.shadowBlur = 0;
+  if (p.t < 1) return true;
+  p.t = 0;
+  if (p.fazis === 0) {
+    piVillanas = Math.min(1, piVillanas + .25);
+    if (p.q.sors === 'blokk') { robban(pi.x - 60, pi.y + (Math.random() - .5) * 50, p.q.d); return false; }
+    p.fazis = p.q.sors === 'net' ? 1 : 3;
+    p.seb *= p.q.sors === 'net' ? 1 : 1.6;
+    return true;
+  }
+  if (p.fazis === 1) { p.fazis = 2; return true; }
+  if (p.fazis === 2) { p.fazis = 3; return true; }
+  k.akt += 1;
+  return false;
+}
+
+function robban(x, y, domain) {
+  pajzsVillanas = 1;
+  for (let i = 0; i < 18; i++) {
+    const s = Math.random() * 2.5 + 1, sz = Math.random() * 7;
+    robbanasok.push({x, y, vx: Math.cos(sz) * s - 1.2, vy: Math.sin(sz) * s, el: 1});
+  }
+  let fy = pi.y - 120 + Math.random() * 240;
+  for (let p = 0; p < 12 && feliratok.some(f => Math.abs(f.y - fy) < 22); p++) fy = pi.y - 130 + Math.random() * 260;
+  feliratok.push({x: pi.x - 80 - Math.random() * 40, y: fy, szoveg: domain, el: 1});
+  if (feliratok.length > 10) feliratok.shift();
+}
+
+function keret(most) {
+  ctx.clearRect(0, 0, W, H);
+  for (const c of csillagok) {
+    ctx.fillStyle = `rgba(120,150,190,${.15 + .15 * Math.sin(most / 1500 + c.f)})`;
+    ctx.fillRect(c.x * W, c.y * H, c.r, c.r);
+  }
+  ctx.strokeStyle = 'rgba(255,181,71,.10)'; ctx.setLineDash([3, 6]); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(pi.x, pi.y); ctx.lineTo(net.x, net.y); ctx.stroke(); ctx.setLineDash([]);
+  for (const k of kliensek.values()) rajzolKliens(k, most);
+  rajzolNet();
+  for (let i = reszecskek.length - 1; i >= 0; i--) if (!lepesReszecske(reszecskek[i])) reszecskek.splice(i, 1);
+  rajzolPi();
+  for (let i = robbanasok.length - 1; i >= 0; i--) {
+    const r = robbanasok[i];
+    r.x += r.vx; r.y += r.vy; r.vy += .03; r.el -= .025;
+    if (r.el <= 0) { robbanasok.splice(i, 1); continue; }
+    ctx.fillStyle = `rgba(255,77,94,${r.el})`; ctx.fillRect(r.x, r.y, 2.4, 2.4);
+  }
+  ctx.textAlign = 'right'; ctx.font = '600 12px ui-monospace,monospace';
+  for (let i = feliratok.length - 1; i >= 0; i--) {
+    const f = feliratok[i];
+    f.y -= .18; f.el -= .006;
+    if (f.el <= 0) { feliratok.splice(i, 1); continue; }
+    ctx.fillStyle = `rgba(255,120,130,${Math.min(1, f.el * 1.6)})`;
+    ctx.fillText('✕ ' + f.szoveg, f.x, f.y);
+  }
+  pajzsVillanas *= .93; piVillanas *= .92;
+  requestAnimationFrame(keret);
+}
+
+function szamFormat(n) { return n == null ? '–' : Number(n).toLocaleString('hu-HU'); }
+function bajt(b) { const e = ['B', 'kB', 'MB', 'GB']; let i = 0; while (b >= 1024 && i < 3) { b /= 1024; i++; } return b.toFixed(i ? 1 : 0) + ' ' + e[i] + '/s'; }
+function ido(mp) { const n = mp / 86400 | 0, o = mp % 86400 / 3600 | 0, p = mp % 3600 / 60 | 0; return (n ? n + 'n ' : '') + o + 'ó ' + p + 'p'; }
+function savSzin(v, sarga, piros) { return v >= piros ? 'var(--piros)' : v >= sarga ? 'var(--sarga)' : 'var(--kek)'; }
+
+const haloTort = [];
+function rajzolHalo() {
+  const c = $('halo-d'), x = c.getContext('2d'), w = c.clientWidth, h = c.clientHeight;
+  c.width = w * DPR; c.height = h * DPR; x.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const max = Math.max(4096, ...haloTort.flat());
+  [[0, '#4aa8ff'], [1, '#3ddc97']].forEach(([j, szin]) => {
+    x.beginPath();
+    haloTort.forEach((v, i) => { const px = i / 59 * w, py = h - 4 - v[j] / max * (h - 10); i ? x.lineTo(px, py) : x.moveTo(px, py); });
+    x.strokeStyle = szin; x.lineWidth = 1.5; x.stroke();
+  });
+}
+
+function frissitSys(s) {
+  cpuMost = s.cpu;
+  $('cpu').textContent = s.cpu.toFixed(0) + '%';
+  $('cpu-s').style.width = s.cpu + '%'; $('cpu-s').style.background = savSzin(s.cpu, 60, 85);
+  $('hom').textContent = s.hom.toFixed(1) + ' °C';
+  $('hom-s').style.width = Math.min(100, (s.hom - 30) / 55 * 100) + '%'; $('hom-s').style.background = savSzin(s.hom, 60, 75);
+  $('ram').textContent = s.ram.toFixed(0) + '% / ' + s.ram_gb + ' GB';
+  $('ram-s').style.width = s.ram + '%'; $('ram-s').style.background = savSzin(s.ram, 75, 90);
+  const m = $('magok');
+  if (m.children.length !== s.magok.length) m.innerHTML = s.magok.map(() => '<div class="mag"><i></i></div>').join('');
+  s.magok.forEach((v, i) => m.children[i].firstChild.style.height = v + '%');
+  $('uptime').textContent = ido(s.uptime);
+  $('load').textContent = s.terheles.join(' ');
+  $('vent').textContent = s.vent == null ? '?' : s.vent ? 'pörög' : 'áll';
+  const e = s.halo.eth0 || [0, 0], wl = s.halo.wlan0 || [0, 0];
+  const rx = e[0] + wl[0], tx = e[1] + wl[1];
+  haloTort.push([rx, tx]); if (haloTort.length > 60) haloTort.shift();
+  $('halo').innerHTML = `<span style="color:var(--kek)">↓ ${bajt(rx)}</span> <span style="color:var(--zold)">↑ ${bajt(tx)}</span>`;
+  rajzolHalo();
+}
+
+const rackAkt = new Map();
+function frissitDocker(lista) {
+  const fut = lista.filter(k => k.allapot === 'ok').length;
+  $('kont-db').textContent = fut + ' / ' + lista.length;
+  $('rack').innerHTML = lista.map(k => `<div class="penge" title="${k.nev} · ${k.kep} · ${k.status}">
+    <div class="led ${k.allapot}"></div><div class="led akt" data-cpu="${k.cpu}"></div>
+    <div class="nev">${k.rovid}</div><div class="cpu">${k.cpu ? k.cpu.toFixed(1) + '%' : ''}</div></div>`).join('');
+}
+setInterval(() => {
+  document.querySelectorAll('.led.akt').forEach(l => {
+    const c = parseFloat(l.dataset.cpu) || 0;
+    l.classList.toggle('be', Math.random() < Math.min(.95, .04 + c / 25));
+  });
+}, 120);
+
+function frissitOsszesito(o) {
+  $('ossz').textContent = szamFormat(o.ossz);
+  $('blokk').textContent = szamFormat(o.blokk);
+  $('szazalek').textContent = o.szazalek + '%';
+  $('lista').textContent = o.lista ? (o.lista / 1e6).toFixed(2) + ' M' : '–';
+}
+
+const szalag = $('szalag'); let szalagX = 0;
+function szalagba(q) {
+  const s = document.createElement('span'); s.className = q.sors;
+  s.textContent = (q.sors === 'blokk' ? '✕ ' : '') + q.d + '  ← ' + rovidNev(q.kl);
+  szalag.appendChild(s);
+  while (szalag.children.length > 60) szalag.removeChild(szalag.firstChild);
+}
+(function gorget() {
+  szalagX -= 1.1;
+  const elso = szalag.firstElementChild;
+  if (elso && szalagX + szalag.offsetWidth < 0) szalagX = 0;
+  szalag.style.transform = `translateX(${szalagX}px)`;
+  requestAnimationFrame(gorget);
+})();
+
+function frissitTop(q) {
+  blokkSzamlalo.set(q.d, (blokkSzamlalo.get(q.d) || 0) + 1);
+  const top = [...blokkSzamlalo.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  $('toplista').replaceChildren(...top.map(([d, n]) => {
+    const li = document.createElement('li'), a = document.createElement('span'), b = document.createElement('span');
+    a.textContent = d; b.textContent = n + '×'; li.append(a, b); return li;
+  }));
+}
+
+function dns(lista) {
+  const most = Date.now();
+  const atlag = 1000 / Math.max(lista.length, 1);
+  lista.forEach((q, i) => {
+    percablak.push(most);
+    indit(q, i * Math.min(atlag, 60) / 1000 * 2.5);
+    szalagba(q);
+    if (q.sors === 'blokk') frissitTop(q);
+  });
+}
+setInterval(() => {
+  const hatar = Date.now() - 60000;
+  while (percablak.length && percablak[0] < hatar) percablak.shift();
+  $('qpm').textContent = percablak.length;
+  $('ora').textContent = new Date().toLocaleTimeString('hu-HU');
+}, 500);
+
+function toast(sz) { const t = $('toast'); t.textContent = sz; t.classList.add('lat'); clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove('lat'), 2600); }
+
+async function demo(ut, gomb, uzenet) {
+  gomb.disabled = true;
+  try {
+    const v = await fetch(ut, {method: 'POST'});
+    const j = await v.json();
+    toast(v.ok ? uzenet : `Várj még ${j.mp} mp-et`);
+  } catch { toast('Nem sikerült elérni a szervert'); }
+  setTimeout(() => gomb.disabled = false, 3000);
+}
+$('g-reklam').onclick = e => demo('demo/reklam', e.target, 'A szerver 30 reklám-domaint kérdez le – figyeld a pajzsot!');
+$('g-terheles').onclick = e => demo('demo/terheles', e.target, '12 mp teljes terhelés – figyeld a magokat és a hőt');
+$('g-teljes').onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+
+let wifiJelszo = '', wifiIdozito = null, jelszoLatszik = false;
+async function wifiFrissit() {
+  try {
+    const j = await (await fetch('wifi', {cache: 'no-store'})).json();
+    if (j.hiba) throw new Error(j.hiba);
+    if (!$('wifi-qr').dataset.kesz || wifiJelszo !== j.jelszo) {
+      $('wifi-qr').innerHTML = j.svg;
+      $('wifi-qr').dataset.kesz = 1;
+    }
+    wifiJelszo = j.jelszo;
+    $('wifi-ssid').textContent = j.ssid;
+    $('wifi-jelszo').textContent = jelszoLatszik ? j.jelszo : '••••••••';
+    $('wifi-db').textContent = j.eszkozok;
+    $('wifi-pont').classList.toggle('halott', !j.aktiv);
+  } catch { toast('Nem sikerült lekérni a wifi adatait'); }
+}
+function wifiNyit() { $('wifi').classList.add('lat'); wifiFrissit(); wifiIdozito = setInterval(wifiFrissit, 5000); }
+function wifiZar() { $('wifi').classList.remove('lat'); clearInterval(wifiIdozito); jelszoLatszik = false; $('wifi-mutat').textContent = 'mutat'; $('wifi-jelszo').textContent = '••••••••'; }
+$('g-wifi').onclick = wifiNyit;
+$('wifi-bezar').onclick = wifiZar;
+$('wifi').onclick = e => { if (e.target.id === 'wifi') wifiZar(); };
+addEventListener('keydown', e => { if (e.key === 'Escape') wifiZar(); });
+$('wifi-mutat').onclick = () => {
+  jelszoLatszik = !jelszoLatszik;
+  $('wifi-mutat').textContent = jelszoLatszik ? 'elrejt' : 'mutat';
+  $('wifi-jelszo').textContent = jelszoLatszik ? wifiJelszo : '••••••••';
+};
+if (location.hash === '#wifi') wifiNyit();
+
+function kapcsolodik() {
+  const es = new EventSource('stream');
+  es.addEventListener('sys', e => { $('pulzus').classList.remove('halott'); frissitSys(JSON.parse(e.data)); });
+  es.addEventListener('docker', e => frissitDocker(JSON.parse(e.data)));
+  es.addEventListener('osszesito', e => frissitOsszesito(JSON.parse(e.data)));
+  es.addEventListener('dns', e => dns(JSON.parse(e.data)));
+  es.onerror = () => $('pulzus').classList.add('halott');
+}
+
+meretez();
+kliens('picloud');
+requestAnimationFrame(keret);
+kapcsolodik();
+</script>
+</body>
+</html>

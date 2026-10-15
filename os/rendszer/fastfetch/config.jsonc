@@ -1,0 +1,50 @@
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "logo": {
+    "type": "file",
+    "source": "/usr/share/botirocky/fastfetch-logo.txt",
+    "color": {
+      "1": "38;2;61;75;92",
+      "2": "38;2;91;107;125",
+      "3": "38;2;95;114;134",
+      "4": "38;2;79;209;165",
+      "5": "38;2;242;184;75",
+      "6": "1;38;2;243;246;249"
+    },
+    "padding": { "top": 1, "left": 2, "right": 4 }
+  },
+  "display": {
+    "separator": "  ",
+    "color": {
+      "keys": "38;2;79;209;165",
+      "title": "1;38;2;243;246;249",
+      "output": "38;2;205;214;224",
+      "separator": "38;2;95;114;134"
+    },
+    "bar": { "char": { "elapsed": "■", "total": "·" }, "width": 12 },
+    "percent": { "type": ["num", "bar"], "color": { "green": "38;2;79;209;165", "yellow": "38;2;242;184;75", "red": "38;2;235;100;100" } }
+  },
+  "modules": [
+    { "type": "title", "format": "{user-name}{at-symbol-colored}{host-name}" },
+    { "type": "custom", "format": "\u001b[38;2;61;75;92m──────────────────────────────────────────" },
+    { "type": "os", "key": "Rendszer  ", "format": "{name} · Debian {version-id} ({codename})" },
+    { "type": "kernel", "key": "Kernel    " },
+    { "type": "uptime", "key": "Üzemidő   " },
+    { "type": "loadavg", "key": "Terhelés  " },
+    { "type": "custom", "format": "" },
+    { "type": "cpu", "key": "CPU       ", "format": "{name} · {cores-logical} szál" },
+    { "type": "memory", "key": "RAM       " },
+    { "type": "swap", "key": "Swap      " },
+    { "type": "disk", "key": "Lemez     ", "folders": "/" },
+    { "type": "custom", "format": "" },
+    { "type": "localip", "key": "Helyi IP  ", "showIpv4": true, "showIpv6": false, "compact": true },
+    { "type": "command", "key": "Tailscale ", "text": "tailscale ip -4 2>/dev/null | head -1 | grep . || echo nincs bent" },
+    { "type": "command", "key": "Hálózat   ", "text": "nmcli -t -f NAME,TYPE con show --active 2>/dev/null | awk -F: '$2 ~ /wireless|ethernet/ {print $1; exit}' | grep . || echo ?" },
+    { "type": "custom", "format": "" },
+    { "type": "command", "key": "Konténerek", "text": "if docker info >/dev/null 2>&1; then f=$(docker ps -q | wc -l); o=$(docker ps -aq | wc -l); b=$(docker ps --filter health=unhealthy -q | wc -l); printf '%s / %s fut' \"$f\" \"$o\"; [ \"$b\" -gt 0 ] && printf ' · %s beteg' \"$b\"; echo; else echo 'nincs jog (docker csoport)'; fi" },
+    { "type": "command", "key": "Mentés    ", "text": "t=$(systemctl show park-mentes.service -P ExecMainExitTimestamp 2>/dev/null); r=$(systemctl show park-mentes.service -P Result 2>/dev/null); n=$(systemctl show park-mentes.timer -P NextElapseUSecRealtime 2>/dev/null); if [ -n \"$t\" ]; then printf '%s · %s' \"$(date -d \"$t\" '+%m.%d %H:%M' 2>/dev/null)\" \"$([ \"$r\" = success ] && echo rendben || echo \"HIBA ($r)\")\"; else printf 'még nem futott'; fi; [ -n \"$n\" ] && printf ' · köv.: %s' \"$(date -d \"$n\" '+%H:%M' 2>/dev/null)\"; echo" },
+    { "type": "command", "key": "Hibás unit", "text": "n=$(systemctl --failed --no-legend 2>/dev/null | wc -l); [ \"$n\" -eq 0 ] && echo nincs || systemctl --failed --no-legend --plain | awk '{print $1}' | head -3 | paste -sd, -" },
+    { "type": "custom", "format": "" },
+    { "type": "colors", "symbol": "circle", "paddingLeft": 0 }
+  ]
+}

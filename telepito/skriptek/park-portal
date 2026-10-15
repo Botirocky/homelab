@@ -1,0 +1,503 @@
+#!/usr/bin/env python3
+import hmac
+import html
+import ipaddress
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+KONF = "/etc/park-portal.conf"
+ALLAPOT_DIR = "/var/lib/park-portal"
+ENGEDETT_FAJL = f"{ALLAPOT_DIR}/engedett.json"
+NFT_FAJL = "/etc/park-portal/portal.nft"
+LEASE_FAJL = "/var/lib/NetworkManager/dnsmasq-wlan0.leases"
+
+
+def konf_olvas():
+    k = {
+        "PORT": "8077",
+        "INTERFESZ": "wlan0",
+        "PORTAL_IP": "10.42.0.1",
+        "ADMIN_CIM": "100.64.0.1",
+        "ERVENYES_NAP": "30",
+        "KERELEM_PERC": "15",
+        "JELSZO_FAJL": "/root/.hotspot-jelszo",
+        "ENV_FAJL": "/srv/szerverpark/.env",
+        "HALO_NEV": "picloud-net",
+    }
+    for fajl in (KONF,):
+        try:
+            with open(fajl) as f:
+                for sor in f:
+                    sor = sor.strip()
+                    if sor and not sor.startswith("#") and "=" in sor:
+                        kulcs, ertek = sor.split("=", 1)
+                        k[kulcs.strip()] = ertek.strip().strip('"')
+        except FileNotFoundError:
+            pass
+    return k
+
+
+K = konf_olvas()
+PORT = int(K["PORT"])
+ERVENYES_MP = int(K["ERVENYES_NAP"]) * 86400
+KERELEM_MP = int(K["KERELEM_PERC"]) * 60
+ADMIN_HALOK = [ipaddress.ip_network(h) for h in ("100.64.0.0/10", "127.0.0.0/8", "fd7a:115c:a1e0::/48", "::1/128")]
+EMAIL_MINTA = re.compile(r"^[^@\s<>\"']{1,64}@[^@\s<>\"']{1,190}\.[A-Za-z]{2,}$")
+
+zar = threading.Lock()
+kerelmek = {}
+probalkozasok = {}
+
+
+def naplo(szoveg):
+    print(szoveg, flush=True)
+
+
+def nft(*args, bemenet=None):
+    return subprocess.run(["nft", *args], input=bemenet, capture_output=True, text=True)
+
+
+def engedett_olvas():
+    try:
+        with open(ENGEDETT_FAJL) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def engedett_ir(adat):
+    os.makedirs(ALLAPOT_DIR, exist_ok=True)
+    ideiglenes = ENGEDETT_FAJL + ".uj"
+    with open(ideiglenes, "w") as f:
+        json.dump(adat, f, ensure_ascii=False, indent=1)
+    os.replace(ideiglenes, ENGEDETT_FAJL)
+
+
+def nft_elem_hozzaad(mac, lejar):
+    if lejar is None:
+        return nft("add", "element", "inet", "park_portal", "engedett", f"{{ {mac} }}").returncode == 0
+    hatra = int(lejar - time.time())
+    if hatra <= 0:
+        return False
+    return nft("add", "element", "inet", "park_portal", "engedett", f"{{ {mac} timeout {hatra}s }}").returncode == 0
+
+
+def nft_elem_torol(mac):
+    nft("delete", "element", "inet", "park_portal", "engedett", f"{{ {mac} }}")
+
+
+def kapcsolatok_bont(mac):
+    ip = None
+    for sor in arp_tabla():
+        if sor[1] == mac:
+            ip = sor[0]
+    if ip:
+        subprocess.run(["conntrack", "-D", "-s", ip], capture_output=True)
+
+
+def enged(mac, email, nev, napok=None, orokre=False):
+    mac = mac.lower()
+    lejar = None if orokre else time.time() + (napok * 86400 if napok else ERVENYES_MP)
+    with zar:
+        adat = engedett_olvas()
+        adat[mac] = {"email": email, "nev": nev, "lejar": lejar, "engedve": time.time()}
+        engedett_ir(adat)
+    nft_elem_torol(mac)
+    nft_elem_hozzaad(mac, lejar)
+
+
+def tilt(mac):
+    mac = mac.lower()
+    with zar:
+        adat = engedett_olvas()
+        adat.pop(mac, None)
+        engedett_ir(adat)
+    nft_elem_torol(mac)
+    kapcsolatok_bont(mac)
+
+
+def betolt():
+    r = nft("-f", NFT_FAJL)
+    if r.returncode != 0:
+        naplo(f"nft hiba: {r.stderr.strip()}")
+        sys.exit(1)
+    with zar:
+        adat = engedett_olvas()
+        most = time.time()
+        lejartak = [m for m, e in adat.items() if e.get("lejar") is not None and e["lejar"] <= most]
+        for m in lejartak:
+            adat.pop(m)
+        engedett_ir(adat)
+    for mac, e in adat.items():
+        nft_elem_hozzaad(mac, e.get("lejar"))
+    naplo(f"tűzfal betöltve, {len(adat)} engedélyezett eszköz")
+
+
+def arp_tabla():
+    try:
+        with open("/proc/net/arp") as f:
+            return [(s.split()[0], s.split()[3].lower(), s.split()[5]) for s in f.readlines()[1:]]
+    except OSError:
+        return []
+
+
+def mac_ip_alapjan(ip):
+    for cim, mac, eszk in arp_tabla():
+        if cim == ip and eszk == K["INTERFESZ"] and mac != "00:00:00:00:00:00":
+            return mac
+    subprocess.run(["ping", "-c1", "-W1", ip], capture_output=True)
+    for cim, mac, eszk in arp_tabla():
+        if cim == ip and eszk == K["INTERFESZ"] and mac != "00:00:00:00:00:00":
+            return mac
+    return None
+
+
+def eszkoz_nev(mac):
+    try:
+        with open(LEASE_FAJL) as f:
+            for sor in f:
+                r = sor.split()
+                if len(r) >= 4 and r[1].lower() == mac:
+                    return r[3] if r[3] != "*" else ""
+    except OSError:
+        pass
+    return ""
+
+
+def wifi_jelszo():
+    try:
+        with open(K["JELSZO_FAJL"]) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def ntfy_cim():
+    try:
+        with open(K["ENV_FAJL"]) as f:
+            for sor in f:
+                if sor.startswith("NTFY_URL="):
+                    return sor.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return None
+
+
+def ertesit(kerelem):
+    cim = ntfy_cim()
+    if not cim:
+        naplo("nincs NTFY_URL – az értesítés kimarad")
+        return
+    szerver, tema = cim.rstrip("/").rsplit("/", 1)
+    alap = f"http://{K['ADMIN_CIM']}:{PORT}"
+    torzs = {
+        "topic": tema,
+        "title": f"Csatlakozna a {K['HALO_NEV']}-re",
+        "message": f"{kerelem['email']}\n{kerelem['nev'] or 'ismeretlen eszköz'} ({kerelem['mac']}, {kerelem['ip']})\n"
+                   f"Engedélyezés {int(K['ERVENYES_NAP'])} napra.",
+        "tags": ["wifi"],
+        "priority": 4,
+        "click": f"{alap}/admin",
+        "actions": [
+            {"action": "http", "label": "Engedélyez", "url": f"{alap}/d/{kerelem['token']}/ok", "method": "POST", "clear": True},
+            {"action": "http", "label": "Tilt", "url": f"{alap}/d/{kerelem['token']}/nem", "method": "POST", "clear": True},
+        ],
+    }
+    try:
+        keres = urllib.request.Request(szerver, data=json.dumps(torzs).encode(), headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(keres, timeout=10).read()
+    except Exception as e:
+        naplo(f"ntfy hiba: {e}")
+
+
+def kerelmek_takarit():
+    most = time.time()
+    for t in [t for t, k in kerelmek.items() if most - k["ido"] > KERELEM_MP and k["allapot"] == "var"]:
+        kerelmek[t]["allapot"] = "lejart"
+    for t in [t for t, k in kerelmek.items() if most - k["ido"] > 86400]:
+        kerelmek.pop(t)
+
+
+STILUS = """
+:root{--h:#f4f5f7;--k:#ffffff;--sz:#1c1f24;--m:#5d6470;--a:#2f6fdf;--v:#d8dbe0;--j:#1f8a4c;--p:#c0392b}
+@media (prefers-color-scheme:dark){:root{--h:#14161a;--k:#1d2026;--sz:#e8eaee;--m:#9aa1ad;--a:#6b9bff;--v:#2e323a;--j:#4cc38a;--p:#ff6b5b}}
+*{box-sizing:border-box}body{margin:0;background:var(--h);color:var(--sz);font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px}
+main{background:var(--k);border:1px solid var(--v);border-radius:14px;padding:28px 24px;width:100%;max-width:400px}
+h1{font-size:1.3rem;margin:0 0 4px}p{color:var(--m);margin:0 0 18px}
+label{display:block;font-size:.9rem;font-weight:600;margin:14px 0 6px}
+input{width:100%;padding:11px 12px;border:1px solid var(--v);border-radius:9px;background:var(--h);color:var(--sz);font-size:16px}
+button{margin-top:20px;width:100%;padding:12px;border:0;border-radius:9px;background:var(--a);color:#fff;font-size:16px;font-weight:600;cursor:pointer}
+.hiba{color:var(--p);font-weight:600}.ok{color:var(--j);font-weight:600}.kicsi{font-size:.85rem;color:var(--m);margin-top:18px}
+table{width:100%;border-collapse:collapse;font-size:.9rem}td{padding:8px 4px;border-top:1px solid var(--v);vertical-align:top}
+td form{display:inline}td button{width:auto;margin:0 4px 0 0;padding:6px 10px;font-size:.85rem}.tilt{background:var(--p)}
+"""
+
+
+def oldal(cim, tartalom, frissit=None, szeles=False):
+    meta = f'<meta http-equiv="refresh" content="{frissit}">' if frissit else ""
+    szelesseg = ' style="max-width:720px"' if szeles else ""
+    return (f'<!doctype html><html lang="hu"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1">{meta}'
+            f"<title>{html.escape(cim)}</title><style>{STILUS}</style></head>"
+            f"<body><main{szelesseg}>{tartalom}</main></body></html>")
+
+
+def urlap(hiba="", email=""):
+    h = f'<p class="hiba">{html.escape(hiba)}</p>' if hiba else ""
+    return oldal(f"{K['HALO_NEV']} – belépés", f"""
+<h1>{html.escape(K['HALO_NEV'])}</h1>
+<p>Az internet-hozzáféréshez add meg az e-mail-címed és a wifi jelszavát. A kérést a hálózat gazdája hagyja jóvá.</p>
+{h}
+<form method="post" action="/kerelem">
+<label for="e">E-mail-cím</label>
+<input id="e" name="email" type="email" autocomplete="email" required maxlength="254" value="{html.escape(email)}">
+<label for="j">Wifi-jelszó</label>
+<input id="j" name="jelszo" type="password" autocomplete="current-password" required maxlength="128">
+<button type="submit">Hozzáférés kérése</button>
+</form>""")
+
+
+def varakozas(token):
+    k = kerelmek.get(token)
+    if not k:
+        return oldal("Ismeretlen kérés", '<h1>Ismeretlen kérés</h1><p>Kezdd újra.</p><p><a href="/">Vissza</a></p>')
+    if k["allapot"] == "ok":
+        return oldal("Csatlakozva", f'<h1 class="ok">Kész, van internet</h1><p>A hozzáférés {int(K["ERVENYES_NAP"])} napig érvényes ezen az eszközön.</p>')
+    if k["allapot"] == "nem":
+        return oldal("Elutasítva", '<h1 class="hiba">A kérést elutasították</h1><p>Kérdezd meg a hálózat gazdáját.</p>')
+    if k["allapot"] == "lejart":
+        return oldal("Lejárt", f'<h1>A kérés lejárt</h1><p>{int(K["KERELEM_PERC"])} percen belül nem hagyták jóvá.</p><p><a href="/">Új kérés</a></p>')
+    return oldal("Jóváhagyásra vár", f"""
+<h1>Jóváhagyásra vár…</h1>
+<p>A kérést elküldtük ({html.escape(k['email'])}). Ez az oldal magától frissül; amint jóváhagyják, lesz internet.</p>
+<p class="kicsi">Ne zárd be az oldalt.</p>""", frissit=4)
+
+
+def admin_oldal():
+    kerelmek_takarit()
+    sorok = ""
+    for t, k in sorted(kerelmek.items(), key=lambda x: -x[1]["ido"]):
+        if k["allapot"] != "var":
+            continue
+        sorok += (f"<tr><td>{html.escape(k['email'])}<br><span class='kicsi'>{html.escape(k['nev'] or '?')} · {k['mac']} · {k['ip']}</span></td>"
+                  f"<td><form method='post' action='/d/{t}/ok'><button>Engedélyez</button></form>"
+                  f"<form method='post' action='/d/{t}/nem'><button class='tilt'>Tilt</button></form></td></tr>")
+    kerelem_tabla = f"<table>{sorok}</table>" if sorok else "<p>Nincs függő kérés.</p>"
+    eng = ""
+    for mac, e in sorted(engedett_olvas().items(), key=lambda x: x[1].get("engedve", 0), reverse=True):
+        lejar = "örökre" if e.get("lejar") is None else time.strftime("%Y-%m-%d", time.localtime(e["lejar"]))
+        eng += (f"<tr><td>{html.escape(e.get('email') or '')}<br><span class='kicsi'>{html.escape(e.get('nev') or '?')} · {mac} · lejár: {lejar}</span></td>"
+                f"<td><form method='post' action='/a/tilt/{mac}'><button class='tilt'>Visszavon</button></form></td></tr>")
+    return oldal("Wifi-hozzáférések", f"""
+<h1>Függő kérések</h1>{kerelem_tabla}
+<h1 style="margin-top:28px">Engedélyezett eszközök</h1><table>{eng}</table>""", frissit=15, szeles=True)
+
+
+class Kezelo(BaseHTTPRequestHandler):
+    server_version = "park-portal"
+    sys_version = ""
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def kliens_ip(self):
+        ip = self.client_address[0]
+        return ip[7:] if ip.startswith("::ffff:") else ip
+
+    def admin(self):
+        try:
+            cim = ipaddress.ip_address(self.kliens_ip())
+        except ValueError:
+            return False
+        return any(cim in h for h in ADMIN_HALOK)
+
+    def kuld(self, kod, torzs, tipus="text/html; charset=utf-8", fejlecek=None):
+        adat = torzs.encode() if isinstance(torzs, str) else torzs
+        self.send_response(kod)
+        self.send_header("Content-Type", tipus)
+        self.send_header("Content-Length", str(len(adat)))
+        self.send_header("Cache-Control", "no-store")
+        for kulcs, ertek in (fejlecek or {}).items():
+            self.send_header(kulcs, ertek)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(adat)
+
+    def atiranyit(self, hova):
+        self.kuld(302, "", fejlecek={"Location": hova})
+
+    def portal_cim(self, ut="/"):
+        return f"http://{K['PORTAL_IP']}:{PORT}{ut}"
+
+    def do_HEAD(self):
+        self.do_GET()
+
+    def do_GET(self):
+        ut = urllib.parse.urlsplit(self.path).path
+        if self.admin():
+            if ut in ("/", "/admin"):
+                return self.kuld(200, admin_oldal())
+            return self.kuld(404, "nincs ilyen")
+        host = (self.headers.get("Host") or "").split(":")[0]
+        if host != K["PORTAL_IP"]:
+            return self.atiranyit(self.portal_cim())
+        mac = mac_ip_alapjan(self.kliens_ip())
+        if ut.startswith("/v/"):
+            return self.kuld(200, varakozas(ut[3:]))
+        if mac and mac in engedett_olvas():
+            return self.kuld(200, oldal("Csatlakozva", '<h1 class="ok">Ez az eszköz már engedélyezett</h1><p>Van internet.</p>'))
+        return self.kuld(200, urlap())
+
+    def torzs(self):
+        hossz = min(int(self.headers.get("Content-Length") or 0), 4096)
+        return urllib.parse.parse_qs(self.rfile.read(hossz).decode(errors="replace"))
+
+    def do_POST(self):
+        ut = urllib.parse.urlsplit(self.path).path
+        if self.admin():
+            return self.admin_post(ut)
+        if ut != "/kerelem":
+            return self.kuld(404, "nincs ilyen")
+        ip = self.kliens_ip()
+        mac = mac_ip_alapjan(ip)
+        if not mac:
+            return self.kuld(400, urlap("Nem sikerült azonosítani az eszközt. Csatlakozz újra a wifire."))
+        most = time.time()
+        with zar:
+            hibak = [t for t in probalkozasok.get(mac, []) if most - t < 900]
+            probalkozasok[mac] = hibak
+        if len(hibak) >= 5:
+            return self.kuld(429, urlap("Túl sok hibás próbálkozás. Várj 15 percet."))
+        adat = self.torzs()
+        email = (adat.get("email") or [""])[0].strip()
+        jelszo = (adat.get("jelszo") or [""])[0].rstrip("\r\n")
+        helyes = wifi_jelszo()
+        if not EMAIL_MINTA.match(email):
+            return self.kuld(400, urlap("Érvénytelen e-mail-cím.", email))
+        if not helyes or not hmac.compare_digest(jelszo.encode(), helyes.encode()):
+            with zar:
+                probalkozasok.setdefault(mac, []).append(most)
+            naplo(f"hibás jelszó: {mac} {ip} {email}")
+            return self.kuld(403, urlap("Hibás wifi-jelszó.", email))
+        with zar:
+            kerelmek_takarit()
+            for t, k in kerelmek.items():
+                if k["mac"] == mac and k["allapot"] == "var":
+                    return self.atiranyit(f"/v/{t}")
+            token = secrets.token_urlsafe(18)
+            kerelem = {"token": token, "mac": mac, "ip": ip, "email": email, "nev": eszkoz_nev(mac), "ido": most, "allapot": "var"}
+            kerelmek[token] = kerelem
+        naplo(f"új kérés: {email} {mac} {ip} {kerelem['nev']}")
+        threading.Thread(target=ertesit, args=(kerelem,), daemon=True).start()
+        return self.atiranyit(f"/v/{token}")
+
+    def admin_post(self, ut):
+        resz = ut.strip("/").split("/")
+        if len(resz) == 3 and resz[0] == "d" and resz[2] in ("ok", "nem"):
+            with zar:
+                kerelmek_takarit()
+                k = kerelmek.get(resz[1])
+            if not k or k["allapot"] != "var":
+                return self.kuld(404, "a kérés már nem érvényes", "text/plain; charset=utf-8")
+            if resz[2] == "ok":
+                enged(k["mac"], k["email"], k["nev"])
+                kapcsolatok_bont(k["mac"])
+                naplo(f"engedélyezve: {k['email']} {k['mac']}")
+            else:
+                naplo(f"elutasítva: {k['email']} {k['mac']}")
+            k["allapot"] = resz[2]
+        elif len(resz) == 3 and resz[0] == "a" and resz[1] == "tilt":
+            tilt(resz[2])
+            naplo(f"visszavonva: {resz[2]}")
+        else:
+            return self.kuld(404, "nincs ilyen", "text/plain; charset=utf-8")
+        if "text/html" in (self.headers.get("Accept") or ""):
+            return self.atiranyit("/admin")
+        return self.kuld(200, "ok", "text/plain; charset=utf-8")
+
+
+class Kiszolgalo(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def takarito():
+    while True:
+        time.sleep(3600)
+        with zar:
+            adat = engedett_olvas()
+            most = time.time()
+            lejart = [m for m, e in adat.items() if e.get("lejar") is not None and e["lejar"] <= most]
+            for m in lejart:
+                adat.pop(m)
+            if lejart:
+                engedett_ir(adat)
+                naplo(f"lejárt: {', '.join(lejart)}")
+            kerelmek_takarit()
+
+
+def mac_ellenoriz(mac):
+    if not re.fullmatch(r"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", mac):
+        sys.exit(f"érvénytelen MAC: {mac}")
+    return mac.lower()
+
+
+def cli(args):
+    if not args or args[0] == "lista":
+        adat = engedett_olvas()
+        if not adat:
+            print("nincs engedélyezett eszköz")
+        for mac, e in sorted(adat.items()):
+            lejar = "örökre" if e.get("lejar") is None else time.strftime("%Y-%m-%d %H:%M", time.localtime(e["lejar"]))
+            print(f"{mac}  {e.get('nev') or '?':<18} {e.get('email') or '':<30} lejár: {lejar}")
+    elif args[0] == "enged" and len(args) >= 2:
+        mac = mac_ellenoriz(args[1])
+        idotartam = args[2] if len(args) > 2 else str(K["ERVENYES_NAP"])
+        megj = args[3] if len(args) > 3 else "kézzel engedélyezve"
+        if idotartam == "orokre":
+            enged(mac, megj, eszkoz_nev(mac), orokre=True)
+        else:
+            enged(mac, megj, eszkoz_nev(mac), napok=int(idotartam))
+        print(f"engedélyezve: {mac} ({idotartam}{'' if idotartam == 'orokre' else ' nap'})")
+    elif args[0] == "tilt" and len(args) == 2:
+        tilt(mac_ellenoriz(args[1]))
+        print(f"visszavonva: {args[1]}")
+    elif args[0] == "eszkozok":
+        engedett = engedett_olvas()
+        for ip, mac, eszk in arp_tabla():
+            if eszk == K["INTERFESZ"] and mac != "00:00:00:00:00:00":
+                print(f"{ip:<15} {mac}  {eszkoz_nev(mac) or '?':<18} {'ENGEDÉLYEZETT' if mac in engedett else 'nincs engedélye'}")
+    else:
+        print("""park-portal – captive portál a hotspothoz
+  park-portal lista                    engedélyezett eszközök
+  park-portal eszkozok                 a hotspoton most látható eszközök
+  park-portal enged <MAC> [nap|orokre] [megjegyzés]
+  park-portal tilt <MAC>
+  park-portal szerver                  (a park-portal.service futtatja)
+Jóváhagyás: ntfy-értesítés gombjai, vagy http://<tailscale-ip>:PORT/admin""")
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] == ["szerver"]:
+        betolt()
+        threading.Thread(target=takarito, daemon=True).start()
+        srv = Kiszolgalo(("0.0.0.0", PORT), Kezelo)
+        naplo(f"park-portal fut: {PORT}")
+        srv.serve_forever()
+    else:
+        cli(args)
+
+
+if __name__ == "__main__":
+    main()

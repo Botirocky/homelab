@@ -1,0 +1,168 @@
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "logo": {
+    "type": "file",
+    "source": "/usr/share/picloud/fastfetch-logo.txt",
+    "color": {
+      "1": "38;2;205;214;224",
+      "2": "38;2;214;38;88",
+      "3": "38;2;117;169;40",
+      "4": "1;38;2;243;246;249"
+    },
+    "padding": {
+      "top": 1,
+      "left": 1,
+      "right": 3
+    }
+  },
+  "display": {
+    "separator": "  ",
+    "color": {
+      "keys": "38;2;230;72;118",
+      "title": "1;38;2;243;246;249",
+      "output": "38;2;214;222;230",
+      "separator": "38;2;117;169;40"
+    },
+    "bar": {
+      "char": {
+        "elapsed": "■",
+        "total": "·"
+      },
+      "width": 12
+    },
+    "percent": {
+      "type": [
+        "num",
+        "bar"
+      ],
+      "color": {
+        "green": "38;2;117;169;40",
+        "yellow": "38;2;242;184;75",
+        "red": "38;2;214;38;88"
+      }
+    }
+  },
+  "modules": [
+    {
+      "type": "title",
+      "format": "{user-name}{at-symbol-colored}{host-name}"
+    },
+    {
+      "type": "custom",
+      "format": "\u001b[38;2;117;169;40m──────────────────────────────────────────"
+    },
+    {
+      "type": "host",
+      "key": "Modell    ",
+      "format": "{name}"
+    },
+    {
+      "type": "os",
+      "key": "Rendszer  ",
+      "format": "{pretty-name}"
+    },
+    {
+      "type": "kernel",
+      "key": "Kernel    "
+    },
+    {
+      "type": "uptime",
+      "key": "Üzemidő   "
+    },
+    {
+      "type": "loadavg",
+      "key": "Terhelés  "
+    },
+    {
+      "type": "custom",
+      "format": ""
+    },
+    {
+      "type": "cpu",
+      "key": "CPU       ",
+      "format": "{name} · {cores-logical} mag · {freq-max}"
+    },
+    {
+      "type": "command",
+      "key": "Hő / táp  ",
+      "text": "t=$(vcgencmd measure_temp 2>/dev/null | grep -oE '[0-9.]+' || awk '{printf \"%.1f\", $1/1000}' /sys/class/thermal/thermal_zone0/temp); th=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2); f=''; if [ -r /etc/ventilator.conf ] && command -v pinctrl >/dev/null; then g=$(awk -F= '/^GPIO=/{print $2}' /etc/ventilator.conf); pinctrl get \"$g\" 2>/dev/null | grep -q '| hi' && f=' · ventilátor be' || f=' · ventilátor ki'; fi; case \"$th\" in 0x0|'') ts='táp rendben';; *) ts=\"FOJTÁS ($th)\";; esac; echo \"${t} °C · ${ts}${f}\""
+    },
+    {
+      "type": "memory",
+      "key": "RAM       "
+    },
+    {
+      "type": "swap",
+      "key": "Swap      "
+    },
+    {
+      "type": "disk",
+      "key": "SD-kártya ",
+      "folders": "/"
+    },
+    {
+      "type": "command",
+      "key": "Tárolók   ",
+      "text": "findmnt -rno TARGET 2>/dev/null | grep '^/srv/tarolok/' | while read -r m; do df -h --output=pcent,size \"$m\" | awk -v n=\"${m##*/}\" 'NR==2 && $2 !~ /M$/ {printf \"%s %s/%s  \", n, $1, $2}'; done; echo"
+    },
+    {
+      "type": "custom",
+      "format": ""
+    },
+    {
+      "type": "localip",
+      "key": "Helyi IP  ",
+      "showIpv4": true,
+      "showIpv6": false,
+      "compact": true
+    },
+    {
+      "type": "command",
+      "key": "Tailscale ",
+      "text": "ip=$(tailscale ip -4 2>/dev/null | head -1); [ -n \"$ip\" ] && echo \"$ip · exit node\" || echo 'nincs bent'"
+    },
+    {
+      "type": "command",
+      "key": "Hotspot   ",
+      "text": "n=$(ip neigh show dev wlan0 2>/dev/null | grep -E 'REACHABLE|STALE|DELAY|PROBE' | grep -c '^10\\.42\\.'); ip -4 -br a show wlan0 2>/dev/null | grep -q '10.42.0.1' && echo \"picloud-net · $n kliens\" || echo ki"
+    },
+    {
+      "type": "custom",
+      "format": ""
+    },
+    {
+      "type": "command",
+      "key": "Konténerek",
+      "text": "if docker info >/dev/null 2>&1; then f=$(docker ps -q | wc -l); o=$(docker ps -aq | wc -l); b=$(docker ps --filter health=unhealthy -q | wc -l); printf '%s / %s fut' \"$f\" \"$o\"; [ \"$b\" -gt 0 ] && printf ' · %s beteg' \"$b\"; echo; else echo 'nincs jog (docker csoport)'; fi"
+    },
+    {
+      "type": "command",
+      "key": "Pi-hole   ",
+      "text": "docker exec pihole pihole-FTL sqlite3 -readonly -separator ' ' /etc/pihole/pihole-FTL.db \"select count(*), coalesce(sum(status in (1,4,5,6,7,8,9,10,11,15,16)),0) from queries where timestamp > strftime('%s','now','localtime','start of day','utc')\" 2>/dev/null | awk '{p=($1>0)?$2*100/$1:0; printf \"ma %d kérés · %d blokkolva (%.1f%%)\\n\", $1, $2, p}' | grep . || echo 'nem elérhető'"
+    },
+    {
+      "type": "command",
+      "key": "Mentés    ",
+      "text": "l=$(journalctl -t park-mentes -o short-iso --since -3d 2>/dev/null | grep '== Kész:' | tail -1); n=$(systemctl show park-mentes.timer -P NextElapseUSecRealtime 2>/dev/null); if [ -n \"$l\" ]; then printf '%s · lefutott' \"$(date -d \"$(echo \"$l\" | cut -d' ' -f1)\" '+%m.%d %H:%M')\"; else printf 'nincs adat (3 nap)'; fi; [ -n \"$n\" ] && printf ' · köv.: %s' \"$(date -d \"$n\" '+%H:%M' 2>/dev/null)\"; echo"
+    },
+    {
+      "type": "command",
+      "key": "Társgép   ",
+      "text": "l=$(journalctl -t park-mentes -o short-iso --since -3d 2>/dev/null | grep -E 'két külön gépen|társgépre másolás nem sikerült' | tail -1); d=$(date -d \"$(echo \"$l\" | cut -d' ' -f1)\" '+%m.%d %H:%M' 2>/dev/null); case \"$l\" in *'két külön gépen'*) echo \"$d · rendben, a nagy gépen is megvan\";; *'nem sikerült'*) echo \"$d · HIBA: nem jutott át a nagy gépre\";; *) echo 'nincs adat';; esac"
+    },
+    {
+      "type": "command",
+      "key": "Hibás unit",
+      "text": "n=$(systemctl --failed --no-legend 2>/dev/null | wc -l); [ \"$n\" -eq 0 ] && echo nincs || systemctl --failed --no-legend --plain | awk '{print $1}' | head -3 | paste -sd, -"
+    },
+    {
+      "type": "custom",
+      "format": ""
+    },
+    {
+      "type": "colors",
+      "symbol": "circle",
+      "paddingLeft": 0
+    }
+  ]
+}

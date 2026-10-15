@@ -1,0 +1,57 @@
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    container_name: park-miniflux
+    restart: unless-stopped
+    ports:
+      - "8092:8080"
+    environment:
+      TZ: ${TZ}
+      DATABASE_URL: postgres://miniflux:${MINIFLUX_DB_JELSZO}@miniflux-db/miniflux?sslmode=disable
+      RUN_MIGRATIONS: "1"
+      CREATE_ADMIN: "1"
+      ADMIN_USERNAME: ${MINIFLUX_FELHASZNALO}
+      ADMIN_PASSWORD: ${MINIFLUX_JELSZO}
+      BASE_URL: http://hirek.${BELSO_DOMAIN}
+      POLLING_FREQUENCY: "30"
+    depends_on:
+      miniflux-db:
+        condition: service_healthy
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+  miniflux-db:
+    image: postgres:17-alpine
+    container_name: park-miniflux-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: miniflux
+      POSTGRES_PASSWORD: ${MINIFLUX_DB_JELSZO}
+      POSTGRES_DB: miniflux
+    volumes:
+      - ${ADAT_DIR}/miniflux/db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "miniflux"]
+      interval: 10s
+      start_period: 30s
+    networks: [park]
+
+  changedetection:
+    image: dgtlmoon/changedetection.io:latest
+    container_name: park-changedetection
+    restart: unless-stopped
+    ports:
+      - "8093:5000"
+    volumes:
+      - ${ADAT_DIR}/changedetection:/datastore
+    environment:
+      TZ: ${TZ}
+      BASE_URL: http://valtozas.${BELSO_DOMAIN}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

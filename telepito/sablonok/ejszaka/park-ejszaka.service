@@ -1,0 +1,7 @@
+[Unit]
+Description=park: kíméletes éjszakai leállás (megvárja a futó feladatokat)
+
+[Service]
+Type=oneshot
+TimeoutStartSec=infinity
+ExecStart=/usr/local/bin/park-ejszaka

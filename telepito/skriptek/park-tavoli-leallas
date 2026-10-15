@@ -1,0 +1,35 @@
+#!/bin/sh
+
+kabeles_interfesz() {
+    for utvonal in /sys/class/net/en* /sys/class/net/eth*; do
+        [ -e "$utvonal/carrier" ] || continue
+        [ "$(cat "$utvonal/carrier" 2>/dev/null)" = 1 ] && { basename "$utvonal"; return 0; }
+    done
+    return 1
+}
+
+IF="$(kabeles_interfesz)"
+
+case "${SSH_ORIGINAL_COMMAND:-${1:-allapot}}" in
+    allapot)
+        if [ -n "$IF" ]; then
+            echo "kabel $IF $(ethtool "$IF" 2>/dev/null | awk -F': ' '/^[[:space:]]*Wake-on:/{print "wol=" $2}')"
+        else
+            echo "nincs-kabel"
+        fi
+        ;;
+    leallit)
+        if [ -z "$IF" ]; then
+            echo "nincs-kabel"
+            exit 3
+        fi
+        ethtool -s "$IF" wol g >/dev/null 2>&1
+        logger -t park-tavoli-leallas "a picloud leállított (WoL: $IF)"
+        echo "leall $IF"
+        systemd-run --quiet --on-active=3 systemctl poweroff >/dev/null 2>&1
+        ;;
+    *)
+        echo "ismeretlen parancs" >&2
+        exit 2
+        ;;
+esac

@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from collections import Counter
+
+MAPPA = os.environ.get("TS_NEVEK_DIR", "/opt/pihole/etc-pihole/hotspot-hosts")
+FAJL = os.path.join(MAPPA, "tailscale")
+
+
+def tisztit(s):
+    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]", "-", s.lower())).strip("-")[:40]
+
+
+def allapot():
+    if len(sys.argv) > 1:
+        with open(sys.argv[1]) as f:
+            return json.load(f)
+    ki = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=20)
+    if ki.returncode != 0:
+        sys.exit(0)
+    return json.loads(ki.stdout)
+
+
+def lan_cim(cur):
+    if not cur:
+        return None
+    ip = cur.rsplit(":", 1)[0].strip("[]")
+    try:
+        cim = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    return str(cim) if cim.is_private and cim.version == 4 else None
+
+
+d = allapot()
+csomopontok = [p for p in list((d.get("Peer") or {}).values()) + [d.get("Self") or {}] if p.get("DNSName")]
+cimkek = {tisztit(p["DNSName"].split(".")[0]) for p in csomopontok}
+gepek = []
+for p in csomopontok:
+    dns = p["DNSName"].rstrip(".")
+    alap = tisztit(dns.split(".")[0])
+    levagott = re.sub(r"-\d+$", "", alap)
+    if levagott != alap and levagott in cimkek:
+        alap = levagott
+    gepek.append((alap, tisztit(p.get("OS") or "gep"), dns, p))
+
+gyakorisag = Counter(g[0] for g in gepek)
+sorok = []
+for alap, os_nev, dns, p in sorted(gepek, key=lambda g: g[2]):
+    nev = alap if gyakorisag[alap] == 1 else f"{alap}-{os_nev}"
+    for ip in p.get("TailscaleIPs") or []:
+        sorok.append(f"{ip} {nev} {dns}")
+    lan = lan_cim(p.get("CurAddr")) if p.get("Online") else None
+    if lan:
+        sorok.append(f"{lan} {nev} {nev}.lan")
+
+tartalom = "".join(s + "\n" for s in sorok)
+try:
+    with open(FAJL) as f:
+        if f.read() == tartalom:
+            sys.exit(0)
+except FileNotFoundError:
+    pass
+
+os.makedirs(MAPPA, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=MAPPA, prefix=".tailscale.")
+with os.fdopen(fd, "w") as f:
+    f.write(tartalom)
+os.chmod(tmp, 0o644)
+os.replace(tmp, FAJL)
+subprocess.run(["logger", "-t", "park-tailscale-nevek", f"frissítve, {len(sorok)} bejegyzés"], check=False)

@@ -1,0 +1,65 @@
+# Self-hosting alapkészlet: kezelőfelület, figyelés, kezdőlap, jelszókezelő.
+services:
+  dockge:
+    image: louislam/dockge:1
+    container_name: park-dockge
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PARK_DIR}/stackek:/opt/stacks
+      - ${ADAT_DIR}/dockge:/app/data
+    environment:
+      TZ: ${TZ}
+      DOCKGE_STACKS_DIR: /opt/stacks
+    networks: [park]
+
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: park-uptime-kuma
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      - ${ADAT_DIR}/uptime-kuma:/app/data
+    environment:
+      TZ: ${TZ}
+    networks: [park]
+
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    container_name: park-homepage
+    restart: unless-stopped
+    ports:
+      - "3002:3000"
+    volumes:
+      - ${PARK_DIR}/stackek/selfhost/homepage:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Csak olvasásra: ettől látszik a kezdőlapon a külső tárolók szabad helye.
+      - ${TAROLO_DIR:-/srv/tarolok}:/tarolok:ro
+    environment:
+      TZ: ${TZ}
+      HOMEPAGE_ALLOWED_HOSTS: "*"
+    # Hogy a gazdagépen futó dolgokat (Pi-hole, Cockpit) is lássa a widget.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [park]
+
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: park-vaultwarden
+    restart: unless-stopped
+    ports:
+      - "8083:80"
+    volumes:
+      - ${ADAT_DIR}/vaultwarden:/data
+    environment:
+      TZ: ${TZ}
+      SIGNUPS_ALLOWED: ${VAULTWARDEN_REGISZTRACIO:-true}     # az első fiók után: VAULTWARDEN_REGISZTRACIO=false a .env-ben
+      ADMIN_TOKEN: ${VAULTWARDEN_ADMIN_TOKEN}
+    networks: [park]
+
+networks:
+  park:
+    external: true

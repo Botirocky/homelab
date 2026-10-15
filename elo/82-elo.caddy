@@ -1,0 +1,5 @@
+http://elo.park.lan {
+	reverse_proxy host.docker.internal:8791 {
+		flush_interval -1
+	}
+}

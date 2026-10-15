@@ -1,0 +1,24 @@
+services:
+  homebox:
+    image: ghcr.io/sysadminsmedia/homebox:latest
+    container_name: park-homebox
+    restart: unless-stopped
+    ports:
+      - "8105:7745"
+    volumes:
+      - ${ADAT_DIR}/homebox:/data
+    environment:
+      TZ: ${TZ}
+      HBOX_LOG_LEVEL: info
+      HBOX_AUTH_API_KEY_PEPPER: ${HOMEBOX_PEPPER}
+      HBOX_OPTIONS_ALLOW_REGISTRATION: ${HOMEBOX_REGISZTRACIO:-false}
+      HBOX_OPTIONS_CHECK_GITHUB_RELEASE: "false"
+      HBOX_WEB_MAX_UPLOAD_SIZE: "20"
+    mem_limit: 256m
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Biztonsági őr</title>
+<style>
+:root{--bg:#0f1115;--lap:#181b22;--vonal:#262a33;--szoveg:#e6e8ec;--halv:#8b919c;--ok:#3fb27f;--figy:#e0a23a;--baj:#e5484d;--kiem:#5b8def}
+@media (prefers-color-scheme:light){:root{--bg:#f4f5f7;--lap:#fff;--vonal:#e1e4e8;--szoveg:#1b1f24;--halv:#646b75}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--szoveg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:860px;margin:0 auto;padding:20px 16px 40px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}
+h1{font-size:20px;margin:0}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--halv);margin:0 0 10px;font-weight:600}
+.pont{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--halv);margin-right:6px}
+.pont.ok{background:var(--ok)}.pont.baj{background:var(--baj)}
+#kapcs{font-size:13px;color:var(--halv)}
+.lap{background:var(--lap);border:1px solid var(--vonal);border-radius:12px;padding:16px;margin-bottom:14px}
+.racs{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+@media (max-width:600px){.racs{grid-template-columns:repeat(2,1fr)}}
+.szam{font-size:28px;font-weight:650;font-variant-numeric:tabular-nums}
+.cimke{font-size:13px;color:var(--halv)}
+.sorok{display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:14px}
+.sorok span:nth-child(odd){color:var(--halv)}
+#riasztas{display:none;border-color:var(--baj);background:color-mix(in srgb,var(--baj) 14%,var(--lap))}
+#riasztas.van{display:block;animation:lukt 1.2s ease-in-out infinite}
+@keyframes lukt{50%{border-color:transparent}}
+@media (prefers-reduced-motion:reduce){#riasztas.van{animation:none}}
+#kilap{display:none;border-color:var(--figy);background:color-mix(in srgb,var(--figy) 14%,var(--lap))}
+#kilap.van{display:block}
+#kilap strong{font-size:18px;color:var(--figy)}
+.kapcsolo{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+button.veszely{background:var(--baj)}
+button:disabled{opacity:.6;cursor:default}
+#riasztas strong{font-size:18px;color:var(--baj)}
+button{font:inherit;border:0;border-radius:8px;padding:9px 16px;background:var(--kiem);color:#fff;cursor:pointer}
+button.masod{background:transparent;border:1px solid var(--vonal);color:var(--szoveg)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td,th{text-align:left;padding:7px 6px;border-bottom:1px solid var(--vonal)}
+th{color:var(--halv);font-weight:500;font-size:12px}
+tr:last-child td{border-bottom:0}
+.tag{font-size:12px;padding:2px 7px;border-radius:5px;background:var(--vonal)}
+.tag.hangos{background:var(--baj);color:#fff}.tag.halk{background:var(--figy);color:#111}
+.tabla{overflow-x:auto}
+#belepo{display:none;max-width:360px;margin:60px auto}
+#belepo input{width:100%;font:inherit;padding:9px 10px;border-radius:8px;border:1px solid var(--vonal);background:var(--bg);color:var(--szoveg);margin:10px 0}
+.ures{color:var(--halv);font-size:14px}
+pre{margin:0;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--halv)}
+</style>
+</head>
+<body>
+<main>
+<form id="belepo" class="lap">
+<h2>Kulcs</h2>
+<div class="cimke">A Pico <code>titkok.py</code> fájljában lévő KULCS (vagy <code>sudo park-or --kulcs</code> a Pi-n).</div>
+<input id="kulcsmezo" type="password" autocomplete="current-password" required>
+<button>Belépés</button>
+</form>
+<div id="tartalom" hidden>
+<header>
+<h1>Biztonsági őr</h1>
+<div id="kapcs"><span class="pont"></span>kapcsolódás…</div>
+</header>
+<section id="kilap" class="lap">
+<h2>Kikapcsolva</h2>
+<p><strong>Az őr most nem riaszt.</strong></p>
+<p class="cimke">Nem szól, nem villog, a picloud eltűnése sem riaszt. Az eseményeket csendben tovább számolja és naplózza. Áramtalanítás után is kikapcsolva marad.</p>
+</section>
+<section id="riasztas" class="lap">
+<h2>Riasztás</h2>
+<p><strong id="r_cim"></strong></p>
+<div class="sorok" id="r_reszlet"></div>
+<p><button id="nyugta">Nyugtázom</button></p>
+</section>
+<section class="lap kapcsolo">
+<div><h2>Őrzés</h2><div id="kapcsallapot">–</div></div>
+<button id="kapcsgomb" disabled>…</button>
+</section>
+<section class="lap">
+<h2>Állapot</h2>
+<div class="sorok">
+<span>picloud</span><span id="pi">–</span>
+<span>Pico ideje</span><span id="ido">–</span>
+<span>Pico címe</span><span id="ip">–</span>
+<span>Óra / SD</span><span id="hw">–</span>
+</div>
+</section>
+<section class="lap">
+<h2>Számlálók (indulás óta)</h2>
+<div class="racs">
+<div><div class="szam" id="s_belepes">0</div><div class="cimke">belépés</div></div>
+<div><div class="szam" id="s_sudo">0</div><div class="cimke">sudo</div></div>
+<div><div class="szam" id="s_tiltas">0</div><div class="cimke">fail2ban-tiltás</div></div>
+<div><div class="szam" id="s_sikertelen">0</div><div class="cimke">sikertelen próba</div></div>
+</div>
+</section>
+<section class="lap">
+<h2>Utolsó események</h2>
+<div class="tabla"><table><thead><tr><th>Idő</th><th>Esemény</th><th>Ki</th><th>Honnan</th><th>Részlet</th></tr></thead><tbody id="naplo"></tbody></table></div>
+<p class="ures" id="naplo_ures">Még nincs esemény.</p>
+</section>
+<section class="lap" id="sdlap" hidden>
+<h2>SD-napló</h2>
+<pre id="sdnaplo"></pre>
+</section>
+<p><button class="masod" id="kilep">Kulcs törlése</button></p>
+</div>
+</main>
+<script>
+const CIMKE={belepes:"SSH-belépés",sudo:"sudo",sudo_hiba:"rossz sudo-jelszó",tiltas:"fail2ban-tiltás",sikertelen:"sikertelen SSH",teszt:"teszt"};
+const $=id=>document.getElementById(id);
+let kulcs="";
+try{kulcs=localStorage.getItem("or_kulcs")||""}catch(e){}
+let kikapcsolva=false,utolsoRiasztas=null,hangKesz=null,sdIdo=0;
+function sip(){try{hangKesz=hangKesz||new AudioContext();const o=hangKesz.createOscillator(),g=hangKesz.createGain();o.frequency.value=2800;g.gain.value=.08;o.connect(g).connect(hangKesz.destination);o.start();o.stop(hangKesz.currentTime+.35)}catch(e){}}
+function belepo(){$("tartalom").hidden=true;$("belepo").style.display="block";$("kulcsmezo").focus()}
+async function keres(modszer,ut){
+const v=await fetch(ut,{method:modszer,headers:{"X-Kulcs":kulcs},cache:"no-store"});
+if(v.status===401){belepo();throw new Error("kulcs")}
+return v.json()}
+function td(s){const c=document.createElement("td");c.textContent=s||"";return c}
+function rajzol(a){
+$("kapcs").innerHTML='<span class="pont ok"></span>élő';
+kikapcsolva=!!a.kikapcsolva;
+$("kilap").classList.toggle("van",kikapcsolva);
+$("kapcsallapot").innerHTML=kikapcsolva?'<span class="pont"></span>kikapcsolva':'<span class="pont ok"></span>bekapcsolva';
+const kg=$("kapcsgomb");kg.disabled=false;kg.textContent=kikapcsolva?"Bekapcsolás":"Kikapcsolás";kg.className=kikapcsolva?"":"veszely";
+$("pi").innerHTML=a.pi_eletben===null?"még nem jelentkezett":a.pi_eletben?'<span class="pont ok"></span>él':'<span class="pont baj"></span>NEM JELENTKEZIK';
+$("ido").textContent=a.ido;$("ip").textContent=a.ip;
+$("hw").textContent=(a.rtc?"RTC":"nincs RTC")+" · "+(a.sd?"SD":"nincs SD")+(a.oled_hibak?" · OLED-hibák: "+a.oled_hibak:"");
+for(const k in a.szamlalo){const el=$("s_"+k);if(el)el.textContent=a.szamlalo[k]}
+const r=a.riasztas;
+$("riasztas").classList.toggle("van",!!r);
+if(r){
+$("r_cim").textContent=CIMKE[r.tipus]||r.tipus;
+const d=$("r_reszlet");d.replaceChildren();
+for(const[k,v]of[["Idő",r.ido],["Ki",r.ki],["Honnan",r.honnan],["Részlet",r.reszlet]]){if(!v)continue;const a1=document.createElement("span"),a2=document.createElement("span");a1.textContent=k;a2.textContent=v;d.append(a1,a2)}
+const kulcsR=JSON.stringify(r);if(kulcsR!==utolsoRiasztas){utolsoRiasztas=kulcsR;sip()}
+document.title="!! Riasztás – Biztonsági őr"}else{utolsoRiasztas=null;document.title="Biztonsági őr"}
+const tb=$("naplo");tb.replaceChildren();
+for(const e of a.naplo){const tr=document.createElement("tr");tr.append(td(e.ido));const c=td("");const t=document.createElement("span");t.className="tag "+(e.szint||"");t.textContent=CIMKE[e.tipus]||e.tipus;c.append(t);tr.append(c,td(e.ki),td(e.honnan),td(e.reszlet));tb.append(tr)}
+$("naplo_ures").hidden=a.naplo.length>0;
+$("sdlap").hidden=!a.sd;
+if(a.sd&&Date.now()-sdIdo>30000){sdIdo=Date.now();keres("GET","/naplo?n=30").then(n=>{$("sdnaplo").textContent=n.sorok.slice().reverse().join("\n")}).catch(()=>{})}}
+async function frissit(){
+if(!kulcs){belepo();return}
+try{rajzol(await keres("GET","/allapot"))}catch(e){if(e.message!=="kulcs")$("kapcs").innerHTML='<span class="pont baj"></span>nem érem el a Picót'}}
+$("belepo").onsubmit=ev=>{ev.preventDefault();kulcs=$("kulcsmezo").value.trim();try{localStorage.setItem("or_kulcs",kulcs)}catch(e){}$("belepo").style.display="none";$("tartalom").hidden=false;frissit()};
+$("nyugta").onclick=async()=>{try{await keres("POST","/nyugta")}catch(e){}frissit()};
+$("kapcsgomb").onclick=async()=>{
+if(!kikapcsolva&&!confirm("Kikapcsolod az őrt? Amíg vissza nem kapcsolod, semmire nem riaszt."))return;
+$("kapcsgomb").disabled=true;
+try{await keres("POST",kikapcsolva?"/bekapcs":"/kikapcs")}catch(e){}
+frissit()};
+$("kilep").onclick=()=>{kulcs="";try{localStorage.removeItem("or_kulcs")}catch(e){}belepo()};
+document.addEventListener("click",()=>{try{hangKesz=hangKesz||new AudioContext()}catch(e){}},{once:true});
+if(kulcs)$("tartalom").hidden=false;
+frissit();setInterval(frissit,3000);
+</script>
+</body>
+</html>

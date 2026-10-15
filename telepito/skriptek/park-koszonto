@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+PARK_DIR="${PARK_DIR:-/srv/szerverpark}"
+[[ -r /etc/szerverpark.conf ]] && source /etc/szerverpark.conf
+STACKEK="${PARK_DIR}/stackek"
+ADAT_DIR="${ADAT_DIR:-${PARK_DIR}/adat}"
+BELSO_DOMAIN="${BELSO_DOMAIN:-park.lan}"
+
+if [[ -t 1 ]]; then
+    Z=$'\e[32m'; S=$'\e[33m'; P=$'\e[31m'; K=$'\e[36m'; N=$'\e[0m'; G=$'\e[90m'; F=$'\e[1;37m'
+else Z=""; S=""; P=""; K=""; N=""; G=""; F=""; fi
+
+GEP="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo szerver)"
+IP="$(hostname -I 2>/dev/null | awk '{print $1}')"; IP="${IP:-?}"
+FEL="$(uptime -p 2>/dev/null | sed 's/^up //')"; FEL="${FEL:-?}"
+
+ram_pct="?"; if [[ -r /proc/meminfo ]]; then
+    mt="$(awk '/^MemTotal:/{print $2}' /proc/meminfo)"
+    ma="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)"
+    [[ -n "$mt" && "$mt" -gt 0 ]] && ram_pct=$(( (mt-ma)*100/mt ))
+fi
+load="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo ?)"
+magok="$(nproc 2>/dev/null || echo 1)"
+disk_pct() { df -P "$1" 2>/dev/null | tail -1 | awk '{print $5}' | tr -dc '0-9'; }
+dp="$(disk_pct "$PARK_DIR")"; da="$(disk_pct "$ADAT_DIR")"
+
+szin_pct() { local p="${1:-0}"; if (( p>=95 )); then printf '%s' "$P"; elif (( p>=85 )); then printf '%s' "$S"; else printf '%s' "$Z"; fi; }
+
+fut=0; ossz=0; leallt=()
+if command -v docker >/dev/null 2>&1; then
+    while IFS='|' read -r nev state; do
+        [[ -n "$nev" ]] || continue
+        ossz=$((ossz+1))
+        if [[ "$state" == "running" ]]; then fut=$((fut+1)); else leallt+=("${nev#park-}"); fi
+    done < <(docker ps -a --filter 'name=park-' --format '{{.Names}}|{{.State}}' 2>/dev/null)
+fi
+
+allapot="$Z✔ rendben$N"
+if (( ${#leallt[@]} > 0 )); then
+    allapot="$P✘ ${#leallt[@]} szolgáltatás áll: ${leallt[*]}$N"
+elif [[ "$dp" =~ ^[0-9]+$ && "$dp" -ge 90 ]] || [[ "$da" =~ ^[0-9]+$ && "$da" -ge 90 ]] \
+     || [[ "$ram_pct" =~ ^[0-9]+$ && "$ram_pct" -ge 90 ]]; then
+    allapot="$S! figyelj a helyre/memóriára$N"
+elif (( ossz == 0 )); then
+    allapot="$G(még nincs futó szolgáltatás)$N"
+fi
+
+printf '\n %s╭─%s %sszerverpark · %s%s %s(%s)%s\n' "$K" "$N" "$F" "$GEP" "$N" "$G" "$IP" "$N"
+printf ' %s│%s  %s   ·  fent: %s\n' "$K" "$N" "$allapot" "$FEL"
+
+cimek=()
+if [[ -d "${STACKEK}/proxy/sites.d" ]]; then
+    for f in "${STACKEK}/proxy/sites.d/"*.caddy; do
+        [[ -e "$f" ]] || continue
+        while IFS= read -r fej; do
+            addr="$(sed -E 's/[[:space:]]*\{[[:space:]]*$//' <<<"$fej" | awk -F, '{print $1}' | tr -d ' ')"
+            [[ -n "$addr" ]] || continue
+            [[ "$addr" == :* ]] && continue
+            [[ "$addr" == http://* || "$addr" == https://* ]] || addr="http://${addr}"
+            cimek+=("$addr")
+        done < <(grep -E '^[^#[:space:]].*\{[[:space:]]*$' "$f" 2>/dev/null || true)
+    done
+fi
+if (( ${#cimek[@]} > 0 )); then
+    printf ' %s├─%s %sszolgáltatások%s\n' "$K" "$N" "$G" "$N"
+    for c in "${cimek[@]}"; do printf ' %s│%s   %s•%s %s\n' "$K" "$N" "$Z" "$N" "$c"; done
+fi
+if (( ${#leallt[@]} > 0 )); then
+    for c in "${leallt[@]}"; do printf ' %s│%s   %s✘%s %s %s(áll)%s\n' "$K" "$N" "$P" "$N" "$c" "$G" "$N"; done
+fi
+
+printf ' %s├─%s %srendszer%s\n' "$K" "$N" "$G" "$N"
+printf ' %s│%s   RAM %s%s%%%s   ·   terhelés %s (%s mag)\n' "$K" "$N" "$(szin_pct "$ram_pct")" "$ram_pct" "$N" "$load" "$magok"
+[[ -n "$dp" ]] && printf ' %s│%s   lemez %s: %s%s%%%s\n' "$K" "$N" "$PARK_DIR" "$(szin_pct "$dp")" "$dp" "$N"
+[[ -n "$da" && "$da" != "$dp" ]] && printf ' %s│%s   adat  %s: %s%s%%%s\n' "$K" "$N" "$ADAT_DIR" "$(szin_pct "$da")" "$da" "$N"
+
+if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files park-mentes.service >/dev/null 2>&1; then
+    ts="$(systemctl show park-mentes.service -p ExecMainExitTimestamp --value 2>/dev/null || true)"
+    if [[ -n "$ts" && "$ts" != "n/a" ]]; then
+        mikor="$(date -d "$ts" +%s 2>/dev/null || echo 0)"
+        (( mikor > 0 )) && ora=$(( ($(date +%s)-mikor)/3600 )) && \
+            printf ' %s├─%s %smentés%s  utoljára %s órája\n' "$K" "$N" "$G" "$N" "$ora"
+    else
+        printf ' %s├─%s %smentés%s  még nem futott\n' "$K" "$N" "$G" "$N"
+    fi
+fi
+
+printf ' %s╰─%s %sparancsok: park súgó  ·  állapot: park allapot / park egeszseg%s\n\n' "$K" "$N" "$G" "$N"

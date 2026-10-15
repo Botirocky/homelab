@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+ENV="${PARK_DUGALJ_ENV:-$HOME/.config/park/tapo.env}"
+ALL="${XDG_STATE_HOME:-$HOME/.local/state}/park"
+PI_IP="${PARK_PI_IP:-192.168.1.185}"
+FEATHER="${PARK_FEATHER:-http://192.168.1.179}"
+LE_PERC="${OR_LE_PERC:-5}"
+BENT_PERC="${OR_BENT_PERC:-15}"
+TUREM_MP="${OR_TUREM_MP:-900}"
+NAPI_MAX="${OR_NAPI_MAX:-3}"
+EBRESZT_TUREM_PERC=30
+
+mkdir -p "$ALL"
+SZUNET="$ALL/dugalj-or.szunet"
+HIBA_OTA="$ALL/dugalj-or.hiba-ota"
+UTOLSO_FUTAS="$ALL/dugalj-or.utolso-futas"
+UJRAINDITASOK="$ALL/dugalj-or.ujrainditasok"
+EJSZAKA="$ALL/ejszaka.json"
+
+most=$(date +%s)
+
+naplo() {
+    echo "$*"
+    logger -t park-dugalj-or -- "$*" 2>/dev/null || true
+}
+
+ertesit() {
+    naplo "$1"
+    notify-send -a "park" -u critical "Pi dugalj-őr" "$1" 2>/dev/null || true
+}
+
+kasa_hiv() {
+    timeout 40 kasa --host "$TAPO_HOST" "$@" 2>&1 | { grep -v -E 'Unclosed|client_session|connector|connections:' || true; }
+}
+
+pi_ping() {
+    ping -c1 -W2 "$PI_IP" >/dev/null 2>&1 || ping -c1 -W3 "$PI_IP" >/dev/null 2>&1
+}
+
+pi_szolgaltatas() {
+    timeout 6 bash -c "</dev/tcp/$PI_IP/22" 2>/dev/null && return 0
+    curl -s -m6 -o /dev/null "http://$PI_IP/allapot.json"
+}
+
+ejszakai_ablakban() {
+    local j
+    if j=$(curl -s -m5 "$FEATHER/api/allapot") && jq -e .ejszaka >/dev/null 2>&1 <<<"$j"; then
+        jq .ejszaka <<<"$j" >"$EJSZAKA"
+    fi
+    [[ -r "$EJSZAKA" ]] || return 1
+    [[ "$(jq -r .be "$EJSZAKA")" == true ]] || return 1
+    local leall ebreszt perc
+    leall=$(jq -r .leall "$EJSZAKA" | awk -F: '{print $1*60+$2}')
+    ebreszt=$(jq -r .ebreszt "$EJSZAKA" | awk -F: '{print $1*60+$2+'"$EBRESZT_TUREM_PERC"'}')
+    perc=$((10#$(date +%H) * 60 + 10#$(date +%M)))
+    (( (perc - leall + 1440) % 1440 < (ebreszt - leall + 1440) % 1440 ))
+}
+
+hiba_torol() { rm -f "$HIBA_OTA"; }
+
+elozo=$(cat "$UTOLSO_FUTAS" 2>/dev/null || echo 0)
+echo "$most" >"$UTOLSO_FUTAS"
+(( most - elozo > 180 )) && hiba_torol
+
+[[ -e "$SZUNET" ]] && exit 0
+
+if pi_ping && pi_szolgaltatas; then
+    hiba_torol
+    exit 0
+fi
+
+[[ -r "$ENV" ]] || { naplo "nincs meg: $ENV"; exit 1; }
+set -a; . "$ENV"; set +a
+
+ip -4 route get "$TAPO_HOST" 2>/dev/null | grep -q " dev " || exit 0
+ping -c1 -W2 "$TAPO_HOST" >/dev/null 2>&1 || ping -c1 -W3 "$TAPO_HOST" >/dev/null 2>&1 || exit 0
+
+if ejszakai_ablakban; then
+    hiba_torol
+    exit 0
+fi
+
+if pi_ping; then
+    tipus="bent"; kuszob=$((BENT_PERC * 60)); leiras="pingre válaszol, de se SSH, se web"
+else
+    tipus="le"; kuszob=$((LE_PERC * 60)); leiras="pingre sem válaszol"
+fi
+
+ota=$most; elozo_tipus=$tipus
+[[ -r "$HIBA_OTA" ]] && read -r ota elozo_tipus <"$HIBA_OTA"
+[[ "$elozo_tipus" != "$tipus" ]] && ota=$most
+echo "$ota $tipus" >"$HIBA_OTA"
+eltelt=$((most - ota))
+(( eltelt == 0 )) && naplo "a Pi $leiras – figyelem"
+(( eltelt < kuszob )) && exit 0
+
+utolso_uj=$(tail -n1 "$UJRAINDITASOK" 2>/dev/null || echo 0)
+(( most - utolso_uj < TUREM_MP )) && exit 0
+
+napi=$(awk -v h=$((most - 86400)) '$1 > h' "$UJRAINDITASOK" 2>/dev/null | wc -l)
+if (( napi >= NAPI_MAX )); then
+    jelzett="$ALL/dugalj-or.limit-jelzett"
+    if [[ ! -e "$jelzett" ]] || (( most - $(stat -c %Y "$jelzett") > 21600 )); then
+        ertesit "A Pi $((eltelt / 60)) perce nem jó ($leiras), de 24 órán belül már ${napi}× újraindítottam – nem nyúlok hozzá, nézd meg kézzel."
+        touch "$jelzett"
+    fi
+    exit 0
+fi
+
+allapot=$(kasa_hiv state)
+if ! grep -q "Device state: True" <<<"$allapot"; then
+    grep -q "Device state: False" <<<"$allapot" && naplo "a dugalj ki van kapcsolva – szándékosnak veszem, nem nyúlok hozzá"
+    exit 0
+fi
+
+ertesit "A Pi $((eltelt / 60)) perce nem jó ($leiras) – áramtalanítom és visszakapcsolom."
+kasa_hiv off >/dev/null
+sleep 10
+if kasa_hiv on >/dev/null; then
+    echo "$most" >>"$UJRAINDITASOK"
+    tail -n 50 "$UJRAINDITASOK" >"$UJRAINDITASOK.tmp" && mv "$UJRAINDITASOK.tmp" "$UJRAINDITASOK"
+    hiba_torol
+    naplo "áram vissza, a Pi bootol"
+else
+    sleep 5
+    kasa_hiv on >/dev/null || ertesit "NEM sikerült visszakapcsolni a dugaljat! Kapcsold be a Tapo appból."
+    echo "$most" >>"$UJRAINDITASOK"
+fi

@@ -1,0 +1,45 @@
+services:
+  memos:
+    image: neosmemo/memos:stable
+    container_name: park-memos
+    restart: unless-stopped
+    ports:
+      - "8101:5230"
+    volumes:
+      - ${ADAT_DIR}/memos:/var/opt/memos
+    environment:
+      TZ: ${TZ}
+      MEMOS_MODE: prod
+      MEMOS_PORT: "5230"
+    mem_limit: 256m
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+  vikunja:
+    image: vikunja/vikunja:latest
+    container_name: park-vikunja
+    restart: unless-stopped
+    ports:
+      - "8102:3456"
+    volumes:
+      - ${ADAT_DIR}/vikunja/files:/app/vikunja/files
+      - ${ADAT_DIR}/vikunja/db:/db
+    environment:
+      TZ: ${TZ}
+      VIKUNJA_SERVICE_TIMEZONE: ${TZ}
+      VIKUNJA_SERVICE_PUBLICURL: http://teendo.${BELSO_DOMAIN}/
+      VIKUNJA_SERVICE_JWTSECRET: ${VIKUNJA_JWT}
+      VIKUNJA_SERVICE_ENABLEREGISTRATION: "false"
+      VIKUNJA_DATABASE_TYPE: sqlite
+      VIKUNJA_DATABASE_PATH: /db/vikunja.db
+      VIKUNJA_DEFAULTSETTINGS_LANGUAGE: hu-HU
+      VIKUNJA_DEFAULTSETTINGS_WEEK_START: "1"
+    mem_limit: 256m
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+PARK_DIR="${PARK_DIR:-/srv/szerverpark}"
+[[ -r /etc/szerverpark.conf ]] && source /etc/szerverpark.conf
+BELSO_DOMAIN="${BELSO_DOMAIN:-park.lan}"
+PIHOLE_DIR="${PIHOLE_DIR:-/opt/pihole}"
+DNS_FAJL="${PIHOLE_DIR}/etc-dnsmasq.d/park-lan.conf"
+DISPATCHER="/etc/NetworkManager/dispatcher.d/50-park-halozat"
+VEZETEKES_METRIKA=100
+WIFI_METRIKA=600
+
+if [[ -t 1 ]]; then Z=$'\e[32m'; S=$'\e[33m'; P=$'\e[31m'; K=$'\e[36m'; N=$'\e[0m'; G=$'\e[90m'
+else Z=""; S=""; P=""; K=""; N=""; G=""; fi
+ok()   { printf '%s✔%s %s\n' "$Z" "$N" "$*"; }
+info() { printf '%s•%s %s\n' "$K" "$N" "$*"; }
+figy() { printf '%s!%s %s\n' "$S" "$N" "$*" >&2; }
+hiba() { printf '%s✘%s %s\n' "$P" "$N" "$*" >&2; }
+naplo() { logger -t park-halozat "$*" 2>/dev/null; }
+
+sugo() {
+    cat <<'SUGO'
+park-halozat – vezetékes elsőbbség és a belső DNS-nevek IP-követése.
+
+  Ha van bedugva hálózati kábel, a gép arra vált (gyorsabb, stabilabb),
+  és a *.park.lan nevek automatikusan az új IP-re mutatnak.
+
+  park-halozat allapot              melyik kapcsolat aktív, mi az IP
+  park-halozat dns-frissit          a belső nevek igazítása a mostani IP-hez
+  sudo park-halozat --telepit       vezetékes elsőbbség + automatikus IP-követés
+  sudo park-halozat --eltavolit     az automatika kikapcsolása
+SUGO
+}
+
+aktualis_ip() {
+    ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'
+}
+
+aktiv_eszkoz() {
+    ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
+}
+
+kabel_van() {
+    local i
+    for i in /sys/class/net/e*/carrier; do
+        [[ -r "$i" ]] || continue
+        [[ "$(cat "$i" 2>/dev/null)" == "1" ]] && return 0
+    done
+    return 1
+}
+
+parancs_allapot() {
+    local ip esz
+    ip="$(aktualis_ip)"; esz="$(aktiv_eszkoz)"
+    printf '\n%sHálózat%s\n\n' "$K" "$N"
+    printf '  aktív kapcsolat:  %s\n' "${esz:-nincs}"
+    printf '  IP cím:           %s\n' "${ip:-nincs}"
+    printf '  kábel bedugva:    %s\n' "$(kabel_van && echo igen || echo nem)"
+    if [[ -f "$DNS_FAJL" ]]; then
+        printf '  *.%s -> %s\n' "$BELSO_DOMAIN" "$(awk -F/ '/^address=/{print $NF}' "$DNS_FAJL" 2>/dev/null)"
+    fi
+    printf '\n'
+    command -v nmcli >/dev/null && nmcli -t -f NAME,TYPE,DEVICE,STATE connection show --active 2>/dev/null \
+        | grep -vE "bridge|tun|loopback" | sed 's/^/  /'
+    printf '\n'
+}
+
+parancs_dns_frissit() {
+    local ip regi
+    ip="$(aktualis_ip)"
+    [[ -n "$ip" ]] || { figy "nincs aktív IP – kihagyom"; return 1; }
+    [[ -d "$(dirname "$DNS_FAJL")" ]] || { info "nincs Pi-hole ezen a gépen – nincs mit frissíteni"; return 0; }
+
+    regi="$(awk -F/ '/^address=/{print $NF}' "$DNS_FAJL" 2>/dev/null)"
+    [[ "$regi" == "$ip" ]] && { info "a belső nevek már a jó IP-re mutatnak ($ip)"; return 0; }
+
+    printf 'address=/%s/%s\n' "$BELSO_DOMAIN" "$ip" > "$DNS_FAJL" || return 1
+    ok "belső nevek frissítve: *.${BELSO_DOMAIN} -> ${ip} (előtte: ${regi:-nincs})"
+    naplo "DNS frissitve: ${regi:-nincs} -> ${ip}"
+
+    if command -v docker >/dev/null && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^pihole$'; then
+        docker exec pihole pihole restartdns >/dev/null 2>&1 && ok "Pi-hole DNS újratöltve" \
+            || figy "a Pi-hole DNS újratöltése nem sikerült"
+    fi
+}
+
+parancs_telepit() {
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || { hiba "root kell: sudo park-halozat --telepit"; exit 1; }
+
+    if command -v nmcli >/dev/null; then
+        local nev tipus
+        while IFS=: read -r nev tipus; do
+            case "$tipus" in
+                802-3-ethernet)
+                    nmcli connection modify "$nev" \
+                        connection.autoconnect yes \
+                        connection.autoconnect-priority 20 \
+                        ipv4.route-metric "$VEZETEKES_METRIKA" \
+                        ipv6.route-metric "$VEZETEKES_METRIKA" 2>/dev/null \
+                        && ok "vezetékes elsőbbség: $nev (metrika $VEZETEKES_METRIKA)" ;;
+                802-11-wireless)
+                    nmcli connection modify "$nev" \
+                        ipv4.route-metric "$WIFI_METRIKA" \
+                        ipv6.route-metric "$WIFI_METRIKA" 2>/dev/null \
+                        && ok "wifi tartalék: $nev (metrika $WIFI_METRIKA)" ;;
+            esac
+        done < <(nmcli -t -f NAME,TYPE connection show 2>/dev/null)
+    else
+        figy "nincs nmcli – a vezetékes elsőbbséget kézzel kell beállítani"
+    fi
+
+    if [[ -d /etc/NetworkManager/dispatcher.d ]]; then
+        cat > "$DISPATCHER" <<'DISP'
+#!/bin/sh
+ESZKOZ="$1"
+ESEMENY="$2"
+case "$ESEMENY" in
+    up|down|dhcp4-change|dhcp6-change|connectivity-change)
+        [ -x /usr/local/bin/park-halozat ] && /usr/local/bin/park-halozat dns-frissit >/dev/null 2>&1
+        ;;
+esac
+exit 0
+DISP
+        chmod 755 "$DISPATCHER"
+        systemctl enable --now NetworkManager-dispatcher.service >/dev/null 2>&1
+        ok "IP-követés bekapcsolva (a belső nevek maguktól igazodnak)"
+    fi
+
+    cat > /etc/systemd/system/park-halozat.service <<'SVC'
+[Unit]
+Description=park-halozat: belső DNS-nevek igazítása induláskor
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/park-halozat dns-frissit
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SVC
+    systemctl daemon-reload
+    systemctl enable park-halozat.service >/dev/null 2>&1 && ok "induláskori DNS-igazítás bekapcsolva"
+    parancs_dns_frissit
+}
+
+parancs_eltavolit() {
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || { hiba "root kell"; exit 1; }
+    rm -f "$DISPATCHER"
+    systemctl disable --now park-halozat.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/park-halozat.service
+    systemctl daemon-reload
+    ok "hálózati automatika kikapcsolva"
+}
+
+case "${1:-allapot}" in
+    allapot|status)   parancs_allapot ;;
+    dns-frissit)      parancs_dns_frissit ;;
+    --telepit)        parancs_telepit ;;
+    --eltavolit)      parancs_eltavolit ;;
+    -h|--help|sugo)   sugo ;;
+    *)                hiba "ismeretlen parancs: $1"; sugo; exit 1 ;;
+esac

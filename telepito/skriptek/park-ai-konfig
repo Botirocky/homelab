@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PARK_DIR="${PARK_DIR:-/srv/szerverpark}"
+[[ -r /etc/szerverpark.conf ]] && source /etc/szerverpark.conf
+ENV_FAJL="${PARK_DIR}/.env"
+KONFIG="${1:-${PARK_DIR}/stackek/ai/litellm.config.yaml}"
+
+env_ertek() {
+    [[ -r "$ENV_FAJL" ]] || return 0
+    grep -E "^$1=" "$ENV_FAJL" | tail -1 | cut -d= -f2- | sed -E 's/^"(.*)"$/\1/'
+}
+
+SZOLGALTATOK=(anthropic openai gemini groq mistral deepseek xai openrouter)
+declare -A VALTOZO=(
+    [anthropic]=ANTHROPIC_API_KEY [openai]=OPENAI_API_KEY [gemini]=GEMINI_API_KEY
+    [groq]=GROQ_API_KEY [mistral]=MISTRAL_API_KEY [deepseek]=DEEPSEEK_API_KEY
+    [xai]=XAI_API_KEY [openrouter]=OPENROUTER_API_KEY
+)
+
+aktiv=()
+for sz in "${SZOLGALTATOK[@]}"; do
+    [[ -n "$(env_ertek "${VALTOZO[$sz]}")" ]] && aktiv+=("$sz")
+done
+
+ollama_modellek=()
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx park-ollama; then
+    mapfile -t ollama_modellek < <(docker exec park-ollama ollama list 2>/dev/null | awk 'NR>1 && $1!="" {print $1}' | grep -v embed)
+fi
+if (( ${#ollama_modellek[@]} == 0 )); then
+    read -ra ollama_modellek <<< "$(env_ertek AI_MODELLEK)"
+    mapfile -t ollama_modellek < <(printf '%s\n' "${ollama_modellek[@]}" | grep -v -e embed -e '^$')
+fi
+
+tmp="$(mktemp)"
+{
+    cat <<'FEJ'
+# A park-ai-konfig generálja a .env kulcsaiból – kézzel ne szerkeszd.
+# Csak azok a szolgáltatók szerepelnek, amelyekhez van kulcs: park ai-kulcs <hol> <kulcs>
+
+model_list:
+FEJ
+    for sz in "${aktiv[@]}"; do
+        v="${VALTOZO[$sz]}"
+        if [[ "$sz" == anthropic ]]; then
+            for par in "claude-opus-5.5 claude-opus-5-5" "claude-fable-5.1 claude-fable-5-1" \
+                       "claude-sonnet-5 claude-sonnet-5" "claude-haiku-4.5 claude-haiku-4-5-20251001"; do
+                set -- $par
+                printf '  - model_name: %s\n    litellm_params: { model: anthropic/%s, api_key: os.environ/%s }\n' "$1" "$2" "$v"
+            done
+        fi
+        printf '  - model_name: "%s/*"\n    litellm_params: { model: "%s/*", api_key: os.environ/%s }\n' "$sz" "$sz" "$v"
+    done
+    for m in "${ollama_modellek[@]}"; do
+        printf '  - model_name: "ollama/%s"\n    litellm_params: { model: "ollama/%s", api_base: http://ollama:11434 }\n' "$m" "$m"
+    done
+    cat <<'LAB'
+
+litellm_settings:
+  drop_params: true
+  num_retries: 2
+  request_timeout: 600
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+LAB
+} > "$tmp"
+
+if [[ -f "$KONFIG" ]] && cmp -s "$tmp" "$KONFIG"; then
+    rm -f "$tmp"
+    echo "változatlan"
+else
+    install -m 0644 "$tmp" "$KONFIG"
+    rm -f "$tmp"
+    echo "frissítve"
+fi
+printf 'szolgáltatók kulccsal: %s\n' "${aktiv[*]:-(egy sem)}"

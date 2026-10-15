@@ -1,0 +1,12 @@
+[Unit]
+Description=park: captive portál a picloud-net hotspothoz (e-mail + jelszó + jóváhagyás)
+After=network-online.target NetworkManager.service ufw.service docker.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/park-portal szerver
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

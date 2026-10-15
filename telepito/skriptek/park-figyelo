@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# park-figyelo – az Uptime Kuma feltöltése: admin fiók, ntfy értesítő és
+# figyelő minden futó szolgáltatáshoz. A Kuma telepítés után üresen áll, a
+# webes varázslót pedig nem lehet parancssorból végigkattintani – ez a script
+# közvetlenül az adatbázisába ír, leállított konténer mellett.
+#
+#   sudo park-figyelo             fiók + értesítő + figyelők létrehozása
+#   sudo park-figyelo --frissit   csak a hiányzó figyelőket veszi fel
+#
+set -euo pipefail
+
+PARK_DIR="${PARK_DIR:-/srv/szerverpark}"
+[[ -r /etc/szerverpark.conf ]] && source /etc/szerverpark.conf
+ADAT_DIR="${ADAT_DIR:-${PARK_DIR}/adat}"
+KUMA_DIR="${ADAT_DIR}/uptime-kuma"
+KUMA_DB="${KUMA_DIR}/kuma.db"
+KONTENER="park-uptime-kuma"
+FELHASZNALO="${KUMA_FELHASZNALO:-picloud}"
+FRISSIT=0
+case "${1:-}" in
+    --frissit) FRISSIT=1 ;;
+    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \?//'; exit 0 ;;
+    "")        ;;
+    *)         echo "Ismeretlen kapcsoló: $1" >&2; exit 1 ;;
+esac
+
+Z=$'\e[32m'; S=$'\e[33m'; P=$'\e[31m'; N=$'\e[0m'
+ok()   { printf '  %s✔%s %s\n' "$Z" "$N" "$1"; }
+figy() { printf '  %s!%s %s\n' "$S" "$N" "$1"; }
+hiba() { printf '  %s✘%s %s\n' "$P" "$N" "$1" >&2; }
+
+[[ ${EUID:-$(id -u)} -eq 0 ]] || { hiba "root kell: sudo park-figyelo"; exit 1; }
+[[ -f "$KUMA_DB" ]] || { hiba "nincs Kuma adatbázis: $KUMA_DB"; exit 1; }
+
+if ! command -v sqlite3 >/dev/null 2>&1; then
+    apt-get install -y -qq sqlite3 >/dev/null 2>&1 || {
+        hiba "kell az sqlite3 csomag: apt install sqlite3"; exit 1; }
+fi
+sql() { sqlite3 "$KUMA_DB" "$1"; }
+
+# ---------------------------------------------------------------- figyelők --
+# A Kuma a park hálózaton fut, ezért a konténereket a nevükön éri el. Ami nem
+# ezen a hálózaton van (Pi-hole, a gazdagépen futó szolgáltatások), azt a híd
+# átjáró-címén keresztül.
+ATJARO="$(docker network inspect park -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo 172.19.0.1)"
+BELSO_DOMAIN="${BELSO_DOMAIN:-park.lan}"
+
+declare -a FIGYELOK=()      # név|típus|url vagy hostname|port|extra
+
+figyelo_hozzaad() { FIGYELOK+=("$1"); }
+
+# Minden konténer a park hálózaton, aminek van publikált portja: a publikált
+# port belső oldalára megy a kérés (azt szolgálja ki a konténer).
+while read -r nev; do
+    [[ -z "$nev" ]] && continue
+    [[ "$nev" == "$KONTENER" ]] && continue
+    halok="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$nev" 2>/dev/null || true)"
+    [[ " $halok " == *" park "* ]] || continue
+    svc="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$nev" 2>/dev/null || true)"
+    [[ -n "$svc" ]] || continue
+    # Az első TCP-s publikált port belső száma. A grep hiánya nem hiba (pipefail!),
+    # csak annyit jelent, hogy ez a konténer nem publikál portot – azt kihagyjuk.
+    port="$(docker inspect -f '{{range $p,$v := .HostConfig.PortBindings}}{{$p}} {{end}}' "$nev" 2>/dev/null \
+            | tr ' ' '\n' | grep '/tcp$' | head -1 | cut -d/ -f1 || true)"
+    [[ -n "$port" ]] || continue
+    case "$svc" in
+        forgejo) port=3000 ;;        # a 22-es SSH-t ne figyeljük HTTP-ként
+    esac
+    figyelo_hozzaad "${svc}|http|http://${svc}:${port}||"
+done < <(docker ps --format '{{.Names}}')
+
+# Pi-hole: külön hálózaton fut, a gazdagépen a 8080-on hallgat.
+if docker ps --format '{{.Names}}' | grep -qx pihole; then
+    figyelo_hozzaad "pihole|http|http://${ATJARO}:8080/admin/||"
+    figyelo_hozzaad "DNS (park.lan)|dns|kezdolap.${BELSO_DOMAIN}|53|${ATJARO}"
+fi
+
+# A csevegő a gazdagépen fut, saját tanúsítvánnyal.
+if ss -ltn 2>/dev/null | grep -q ':8765'; then
+    figyelo_hozzaad "csevego|http|https://${ATJARO}:8765/|| tls"
+fi
+
+# ------------------------------------------------------------ adatbázis -----
+VOLT_FUT=0
+if docker ps --format '{{.Names}}' | grep -qx "$KONTENER"; then
+    VOLT_FUT=1
+    docker stop "$KONTENER" >/dev/null
+fi
+cp -a "$KUMA_DB" "${KUMA_DB}.mentes-$(date +%F-%H%M)"
+
+visszaindit() { (( VOLT_FUT )) && docker start "$KONTENER" >/dev/null || true; }
+trap visszaindit EXIT
+
+# --- felhasználó ---
+VAN_USER="$(sql "select count(*) from user;")"
+if (( VAN_USER == 0 )); then
+    if (( FRISSIT )); then
+        hiba "még nincs fiók – futtasd --frissit nélkül"; exit 1
+    fi
+    JELSZO="$(openssl rand -base64 30 | tr -d '/+=\n' | cut -c1-20)"
+    docker start "$KONTENER" >/dev/null; sleep 5
+    HASH="$(docker exec "$KONTENER" node -e 'console.log(require("bcryptjs").hashSync(process.argv[1],10))' "$JELSZO")"
+    docker stop "$KONTENER" >/dev/null
+    sql "insert into user (username, password, active) values ('${FELHASZNALO}', '${HASH}', 1);"
+    printf '%s\n' "$JELSZO" > /root/.kuma-jelszo; chmod 600 /root/.kuma-jelszo
+    ok "fiók létrehozva: ${FELHASZNALO} / ${JELSZO}   (mentve: /root/.kuma-jelszo)"
+else
+    ok "fiók már van – megtartom"
+fi
+USER_ID="$(sql "select id from user order by id limit 1;")"
+
+# --- ntfy értesítő ---
+ERT_ID="$(sql "select id from notification where name='ntfy' limit 1;")"
+if [[ -z "$ERT_ID" && -n "${NTFY_URL:-}" ]]; then
+    SZERVER="${NTFY_URL%/*}"
+    TOPIC="${NTFY_URL##*/}"
+    KONFIG="{\"type\":\"ntfy\",\"name\":\"ntfy\",\"ntfyserverurl\":\"${SZERVER}\",\"ntfytopic\":\"${TOPIC}\",\"ntfyPriority\":4,\"ntfyAuthenticationMethod\":\"none\",\"isDefault\":true,\"applyExisting\":true}"
+    sql "insert into notification (name, active, user_id, is_default, config) values ('ntfy', 1, ${USER_ID}, 1, '$(printf '%s' "$KONFIG" | sed "s/'/''/g")');"
+    ERT_ID="$(sql "select id from notification where name='ntfy' limit 1;")"
+    ok "ntfy értesítő felvéve (${TOPIC})"
+elif [[ -n "$ERT_ID" ]]; then
+    ok "ntfy értesítő már be van állítva"
+else
+    figy "nincs NTFY_URL a /etc/szerverpark.conf-ban – értesítő nélkül"
+fi
+
+# --- figyelők ---
+UJ=0
+for sor in "${FIGYELOK[@]}"; do
+    IFS='|' read -r nev tipus cim port extra <<<"$sor"
+    LETEZIK="$(sql "select count(*) from monitor where name='$(printf '%s' "$nev" | sed "s/'/''/g")';")"
+    (( LETEZIK > 0 )) && continue
+    tls=0; [[ "$extra" == *tls* ]] && tls=1
+    if [[ "$tipus" == "dns" ]]; then
+        sql "insert into monitor (name,type,hostname,port,dns_resolve_server,dns_resolve_type,user_id,active,interval,retry_interval,resend_interval,maxretries,timeout,accepted_statuscodes_json)
+             values ('${nev}','dns','${cim}',${port},'${extra}','A',${USER_ID},1,300,60,0,2,30,'[\"200-299\"]');"
+    else
+        sql "insert into monitor (name,type,url,user_id,active,interval,retry_interval,resend_interval,maxretries,timeout,ignore_tls,accepted_statuscodes_json)
+             values ('$(printf '%s' "$nev" | sed "s/'/''/g")','http','${cim}',${USER_ID},1,120,60,0,2,30,${tls},'[\"200-299\",\"300-399\",\"400-499\"]');"
+    fi
+    UJ=$((UJ+1))
+done
+
+# --- értesítő rákötése minden figyelőre ---
+if [[ -n "$ERT_ID" ]]; then
+    sql "insert into monitor_notification (monitor_id, notification_id)
+         select m.id, ${ERT_ID} from monitor m
+         where not exists (select 1 from monitor_notification mn
+                           where mn.monitor_id=m.id and mn.notification_id=${ERT_ID});"
+fi
+
+OSSZ="$(sql "select count(*) from monitor;")"
+ok "${UJ} új figyelő (összesen ${OSSZ})"
+visszaindit; trap - EXIT
+ok "Uptime Kuma újraindítva"

@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+import json
+import os
+import random
+import signal
+import socket
+import struct
+import sys
+import subprocess
+import threading
+import time
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PORT = int(os.environ.get("ELO_PORT", "8791"))
+WEB_DIR = os.environ.get("ELO_WEB", "/usr/local/share/park-elo")
+PIHOLE = os.environ.get("ELO_PIHOLE", "http://127.0.0.1:8080")
+PIHOLE_PW_FAJL = os.environ.get("ELO_PIHOLE_PW", "/opt/pihole/etc-pihole/cli_pw")
+
+BLOKKOLT = {
+    "GRAVITY", "REGEX", "DENYLIST", "GRAVITY_CNAME", "REGEX_CNAME", "DENYLIST_CNAME",
+    "EXTERNAL_BLOCKED_IP", "EXTERNAL_BLOCKED_NULL", "EXTERNAL_BLOCKED_NXRA", "SPECIAL_DOMAIN",
+}
+GYORSITOTAR = {"CACHE", "CACHE_STALE"}
+HELYI_VEGEK = (".lan", ".home", ".local", ".arpa", ".ts.net", "pi.hole")
+
+REKLAM_DOMAINEK = [
+    "doubleclick.net", "googleadservices.com", "googlesyndication.com", "adservice.google.com",
+    "ads.yahoo.com", "adnxs.com", "criteo.com", "taboola.com", "outbrain.com", "scorecardresearch.com",
+    "pubmatic.com", "rubiconproject.com", "openx.net", "advertising.com", "moatads.com",
+    "app-measurement.com", "ads.tiktok.com", "an.facebook.com", "pixel.facebook.com", "ad.doubleclick.net",
+    "stats.g.doubleclick.net", "adsrvr.org", "casalemedia.com", "smartadserver.com", "zedo.com",
+    "hotjar.com", "mixpanel.com", "branch.io", "adcolony.com", "unityads.unity3d.com",
+]
+
+allapot_zar = threading.Lock()
+feliratkozok = []
+feliratkozok_zar = threading.Lock()
+utolso = {"sys": None, "docker": None, "osszesito": None}
+demo_utolso = {"reklam": 0.0, "terheles": 0.0}
+
+
+def kozvetit(tipus, adat):
+    uzenet = f"event: {tipus}\ndata: {json.dumps(adat, ensure_ascii=False)}\n\n".encode()
+    with feliratkozok_zar:
+        for q in list(feliratkozok):
+            if len(q) < 200:
+                q.append(uzenet)
+
+
+def olvas(ut, alap=""):
+    try:
+        with open(ut) as f:
+            return f.read()
+    except OSError:
+        return alap
+
+
+class Pihole:
+    def __init__(self):
+        self.sid = None
+
+    def _keres(self, ut, modszer="GET", adat=None):
+        fej = {"Content-Type": "application/json"}
+        if self.sid:
+            fej["sid"] = self.sid
+        req = urllib.request.Request(PIHOLE + ut, method=modszer, headers=fej,
+                                     data=json.dumps(adat).encode() if adat is not None else None)
+        with urllib.request.urlopen(req, timeout=5) as v:
+            return json.load(v)
+
+    def belep(self):
+        jelszo = olvas(PIHOLE_PW_FAJL).strip()
+        self.sid = None
+        self.sid = self._keres("/api/auth", "POST", {"password": jelszo})["session"]["sid"]
+
+    def get(self, ut):
+        if not self.sid:
+            self.belep()
+        try:
+            return self._keres(ut)
+        except urllib.error.HTTPError as e:
+            if e.code != 401:
+                raise
+            self.belep()
+            return self._keres(ut)
+
+    def kilep(self):
+        if self.sid:
+            try:
+                self._keres("/api/auth", "DELETE")
+            except Exception:
+                pass
+
+
+def dns_figyelo(ph):
+    utolso_id = None
+    szamlalo = 0
+    while True:
+        try:
+            adat = ph.get("/api/queries?length=150")
+            uj = []
+            for q in adat.get("queries", []):
+                if utolso_id is not None and q["id"] <= utolso_id:
+                    continue
+                st = q.get("status") or ""
+                if st == "IN_PROGRESS":
+                    continue
+                dom = q.get("domain") or ""
+                if st in BLOKKOLT:
+                    sors = "blokk"
+                elif dom.endswith(HELYI_VEGEK) or "." not in dom:
+                    sors = "helyi"
+                elif st in GYORSITOTAR:
+                    sors = "cache"
+                elif st.startswith("RETRIED") or st == "FORWARDED":
+                    sors = "net"
+                else:
+                    sors = "helyi"
+                kliens = q.get("client") or {}
+                uj.append({
+                    "id": q["id"], "t": q.get("time"), "d": q.get("domain"), "tip": q.get("type"),
+                    "sors": sors, "kl": kliens.get("name") or kliens.get("ip"), "ip": kliens.get("ip"),
+                })
+            ids = [q["id"] for q in adat.get("queries", [])]
+            if ids:
+                legujabb = max(ids)
+                if utolso_id is None:
+                    uj = []
+                utolso_id = max(utolso_id or 0, legujabb)
+            if uj:
+                uj.sort(key=lambda x: x["id"])
+                kozvetit("dns", uj[-80:])
+            szamlalo += 1
+            if szamlalo % 5 == 1:
+                s = ph.get("/api/stats/summary")
+                o = {
+                    "ossz": s["queries"]["total"], "blokk": s["queries"]["blocked"],
+                    "szazalek": round(s["queries"]["percent_blocked"], 1),
+                    "kliensek": s.get("clients", {}).get("active"),
+                    "lista": s.get("gravity", {}).get("domains_being_blocked"),
+                }
+                utolso["osszesito"] = o
+                kozvetit("osszesito", o)
+        except Exception as e:
+            kozvetit("hiba", {"forras": "pihole", "uzenet": str(e)[:120]})
+            time.sleep(4)
+        time.sleep(1)
+
+
+def cpu_minta():
+    sorok = olvas("/proc/stat").splitlines()
+    eredmeny = []
+    for s in sorok:
+        if not s.startswith("cpu"):
+            break
+        r = list(map(int, s.split()[1:]))
+        tetlen = r[3] + r[4]
+        eredmeny.append((sum(r), tetlen))
+    return eredmeny
+
+
+def halo_minta():
+    m = {}
+    for s in olvas("/proc/net/dev").splitlines()[2:]:
+        nev, adat = s.split(":", 1)
+        nev = nev.strip()
+        if nev in ("eth0", "wlan0", "tailscale0"):
+            r = adat.split()
+            m[nev] = (int(r[0]), int(r[8]))
+    return m
+
+
+def ventilator():
+    try:
+        ki = subprocess.run(["pinctrl", "get", "18"], capture_output=True, text=True, timeout=2).stdout
+        return " hi " in ki or "| hi" in ki
+    except Exception:
+        return None
+
+
+def rendszer_figyelo():
+    elozo_cpu, elozo_halo, elozo_t = cpu_minta(), halo_minta(), time.time()
+    n = 0
+    vent = ventilator()
+    while True:
+        time.sleep(1)
+        most_cpu, most_halo, most_t = cpu_minta(), halo_minta(), time.time()
+        dt = max(most_t - elozo_t, 0.001)
+        cpuk = []
+        for (o1, t1), (o2, t2) in zip(elozo_cpu, most_cpu):
+            d = o2 - o1
+            cpuk.append(round(100 * (1 - (t2 - t1) / d), 1) if d else 0)
+        halo = {}
+        for nev, (rx, tx) in most_halo.items():
+            if nev in elozo_halo:
+                halo[nev] = [round((rx - elozo_halo[nev][0]) / dt), round((tx - elozo_halo[nev][1]) / dt)]
+        mem = {}
+        for s in olvas("/proc/meminfo").splitlines():
+            k, v = s.split(":", 1)
+            mem[k] = int(v.split()[0])
+        n += 1
+        if n % 5 == 0:
+            vent = ventilator()
+        adat = {
+            "cpu": cpuk[0] if cpuk else 0,
+            "magok": cpuk[1:],
+            "hom": round(int(olvas("/sys/class/thermal/thermal_zone0/temp", "0")) / 1000, 1),
+            "ram": round(100 * (1 - mem.get("MemAvailable", 0) / max(mem.get("MemTotal", 1), 1)), 1),
+            "ram_gb": round(mem.get("MemTotal", 0) / 1048576, 1),
+            "halo": halo,
+            "uptime": int(float(olvas("/proc/uptime", "0").split()[0])),
+            "terheles": olvas("/proc/loadavg", "0 0 0").split()[:3],
+            "vent": vent,
+            "ido": most_t,
+        }
+        utolso["sys"] = adat
+        kozvetit("sys", adat)
+        elozo_cpu, elozo_halo, elozo_t = most_cpu, most_halo, most_t
+
+
+def docker_figyelo():
+    statok = {}
+    n = 0
+    while True:
+        try:
+            ki = subprocess.run(["docker", "ps", "-a", "--format", "{{json .}}"],
+                                capture_output=True, text=True, timeout=20).stdout
+            if n % 3 == 0:
+                st = subprocess.run(["docker", "stats", "--no-stream", "--format", "{{json .}}"],
+                                    capture_output=True, text=True, timeout=40).stdout
+                statok = {}
+                for s in st.splitlines():
+                    j = json.loads(s)
+                    try:
+                        statok[j["Name"]] = float(j["CPUPerc"].rstrip("%"))
+                    except ValueError:
+                        pass
+            kontenerek = []
+            for s in ki.splitlines():
+                j = json.loads(s)
+                status = j.get("Status", "")
+                if not status.startswith("Up"):
+                    egeszseg = "all"
+                elif "unhealthy" in status:
+                    egeszseg = "beteg"
+                elif "starting" in status:
+                    egeszseg = "indul"
+                else:
+                    egeszseg = "ok"
+                nev = j["Names"]
+                kontenerek.append({
+                    "nev": nev, "rovid": nev.removeprefix("park-"), "allapot": egeszseg,
+                    "status": status, "cpu": statok.get(nev, 0.0),
+                    "kep": j.get("Image", "").split("/")[-1],
+                })
+            kontenerek.sort(key=lambda k: k["rovid"])
+            utolso["docker"] = kontenerek
+            kozvetit("docker", kontenerek)
+        except Exception as e:
+            kozvetit("hiba", {"forras": "docker", "uzenet": str(e)[:120]})
+        n += 1
+        time.sleep(5)
+
+
+HOTSPOT_KAPCSOLAT = os.environ.get("ELO_HOTSPOT", "picloud-hotspot")
+HOTSPOT_JELSZO_FAJL = os.environ.get("ELO_HOTSPOT_PW", "/root/.hotspot-jelszo")
+
+
+def wifi_esc(s):
+    for c in '\\;,:"':
+        s = s.replace(c, "\\" + c)
+    return s
+
+
+def wifi_adat():
+    ssid = subprocess.run(["nmcli", "-g", "802-11-wireless.ssid", "con", "show", HOTSPOT_KAPCSOLAT],
+                          capture_output=True, text=True, timeout=5).stdout.strip() or "picloud-net"
+    jelszo = olvas(HOTSPOT_JELSZO_FAJL).strip()
+    svg = subprocess.run(["qrencode", "-t", "SVG", "-m", "1", "-l", "M", "-o", "-",
+                          f"WIFI:T:WPA;S:{wifi_esc(ssid)};P:{wifi_esc(jelszo)};;"],
+                         capture_output=True, text=True, timeout=5).stdout
+    aktiv = subprocess.run(["nmcli", "-g", "GENERAL.STATE", "con", "show", HOTSPOT_KAPCSOLAT],
+                           capture_output=True, text=True, timeout=5).stdout.strip() == "activated"
+    allomas = subprocess.run(["iw", "dev", "wlan0", "station", "dump"],
+                             capture_output=True, text=True, timeout=5).stdout.count("Station ")
+    return {"ssid": ssid, "jelszo": jelszo, "svg": svg[svg.find("<svg"):], "aktiv": aktiv, "eszkozok": allomas}
+
+
+def dns_csomag(domain):
+    azon = random.randint(0, 65535)
+    fej = struct.pack(">HHHHHH", azon, 0x0100, 1, 0, 0, 0)
+    test = b"".join(bytes([len(r)]) + r.encode() for r in domain.split(".")) + b"\x00"
+    return fej + test + struct.pack(">HH", 1, 1)
+
+
+def reklam_eso():
+    domainek = random.sample(REKLAM_DOMAINEK, len(REKLAM_DOMAINEK))
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.2)
+    for d in domainek:
+        try:
+            s.sendto(dns_csomag(d), ("127.0.0.1", 53))
+            s.recv(512)
+        except OSError:
+            pass
+        time.sleep(0.15)
+    s.close()
+
+
+def terheles(mp=12):
+    vege = time.time() + mp
+    procok = [subprocess.Popen(["nice", "-n", "19", "timeout", str(mp), "sh", "-c", "while :; do :; done"])
+              for _ in range(os.cpu_count() or 4)]
+    while time.time() < vege:
+        time.sleep(0.5)
+    for p in procok:
+        p.wait()
+
+
+class Kezelo(BaseHTTPRequestHandler):
+    server_version = "park-elo"
+
+    def log_message(self, *a):
+        pass
+
+    def _kuld(self, kod, tartalom, tipus="application/json"):
+        self.send_response(kod)
+        self.send_header("Content-Type", tipus)
+        self.send_header("Content-Length", str(len(tartalom)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(tartalom)
+
+    def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            try:
+                with open(os.path.join(WEB_DIR, "index.html"), "rb") as f:
+                    self._kuld(200, f.read(), "text/html; charset=utf-8")
+            except OSError:
+                self._kuld(404, b"nincs index.html", "text/plain")
+        elif self.path == "/wifi":
+            try:
+                self._kuld(200, json.dumps(wifi_adat(), ensure_ascii=False).encode())
+            except Exception as e:
+                self._kuld(500, json.dumps({"hiba": str(e)[:120]}).encode())
+        elif self.path == "/stream":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            q = []
+            for tipus in ("sys", "docker", "osszesito"):
+                if utolso[tipus] is not None:
+                    q.append(f"event: {tipus}\ndata: {json.dumps(utolso[tipus], ensure_ascii=False)}\n\n".encode())
+            with feliratkozok_zar:
+                feliratkozok.append(q)
+            try:
+                utolso_ping = time.time()
+                while True:
+                    if q:
+                        darab = b"".join(q[:])
+                        del q[:]
+                        self.wfile.write(darab)
+                        self.wfile.flush()
+                    elif time.time() - utolso_ping > 15:
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                        utolso_ping = time.time()
+                    time.sleep(0.1)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                with feliratkozok_zar:
+                    if q in feliratkozok:
+                        feliratkozok.remove(q)
+        else:
+            self._kuld(404, b'{"hiba":"nincs ilyen"}')
+
+    def do_POST(self):
+        utvonalak = {"/demo/reklam": ("reklam", 15, reklam_eso), "/demo/terheles": ("terheles", 60, terheles)}
+        if self.path not in utvonalak:
+            self._kuld(404, b'{"hiba":"nincs ilyen"}')
+            return
+        kulcs, szunet, fv = utvonalak[self.path]
+        with allapot_zar:
+            hatra = szunet - (time.time() - demo_utolso[kulcs])
+            if hatra > 0:
+                self._kuld(429, json.dumps({"hiba": "várj", "mp": int(hatra) + 1}).encode())
+                return
+            demo_utolso[kulcs] = time.time()
+        threading.Thread(target=fv, daemon=True).start()
+        kozvetit("demo", {"mi": kulcs})
+        self._kuld(200, b'{"ok":true}')
+
+
+def main():
+    ph = Pihole()
+    for cel, arg in ((dns_figyelo, (ph,)), (rendszer_figyelo, ()), (docker_figyelo, ())):
+        threading.Thread(target=cel, args=arg, daemon=True).start()
+    szerver = ThreadingHTTPServer(("0.0.0.0", PORT), Kezelo)
+    szerver.daemon_threads = True
+    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+    try:
+        szerver.serve_forever()
+    finally:
+        ph.kilep()
+
+
+if __name__ == "__main__":
+    main()

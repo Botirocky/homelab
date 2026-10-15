@@ -1,0 +1,19 @@
+services:
+  forgejo-runner:
+    image: data.forgejo.org/forgejo/runner:${FORGEJO_RUNNER_VERZIO:-13}
+    container_name: park-forgejo-runner
+    restart: unless-stopped
+    user: "1000:${DOCKER_GID:-999}"
+    working_dir: /data
+    command: forgejo-runner --config config.yml daemon
+    volumes:
+      - ${ADAT_DIR}/forgejo-runner:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      TZ: ${TZ}
+      DOCKER_HOST: unix:///var/run/docker.sock
+    networks: [park]
+
+networks:
+  park:
+    external: true

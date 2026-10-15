@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PARK_DIR="${PARK_DIR:-/srv/szerverpark}"
+[[ -r /etc/szerverpark.conf ]] && source /etc/szerverpark.conf
+ENV_FAJL="${PARK_DIR}/.env"
+[[ -f "$ENV_FAJL" ]] && { set -a; source "$ENV_FAJL"; set +a; }
+
+if [[ -t 1 ]]; then Z=$'\e[32m'; S=$'\e[33m'; P=$'\e[31m'; K=$'\e[36m'; N=$'\e[0m'; G=$'\e[90m'
+else Z=""; S=""; P=""; K=""; N=""; G=""; fi
+
+GEP="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo szerver)"
+
+if [[ "${1:-}" == "--teszt" ]]; then
+    cim="Teszt üzenet"
+    uzenet="Ha ezt látod, az értesítés működik. ($GEP)"
+    prio="info"
+else
+    cim="${1:-Szerverpark}"; uzenet="${2:-}"; prio="${3:-info}"
+    if [[ -z "$uzenet" ]]; then
+        echo "Használat: park-ertesito \"Cím\" \"Üzenet\" [info|figy|hiba]" >&2
+        exit 1
+    fi
+fi
+
+case "$prio" in
+    hiba) npri="high";    tag="rotating_light"; jel="🔴"; szin="$P" ;;
+    figy) npri="default"; tag="warning";        jel="🟡"; szin="$S" ;;
+    *)    npri="low";     tag="white_check_mark"; jel="🟢"; szin="$Z" ;;
+esac
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\r'/}"
+    printf '%s' "$s"
+}
+
+printf '%s%s %s%s:%s %s\n' "$szin" "$jel" "$K" "$cim" "$N" "$uzenet"
+
+kuldve=(); hibak=()
+
+if [[ -n "${NTFY_URL:-}" ]]; then
+    if curl -fsS -m 10 \
+        -H "Title: ${GEP}: ${cim}" -H "Priority: ${npri}" -H "Tags: ${tag}" \
+        -d "$uzenet" "$NTFY_URL" >/dev/null 2>&1; then
+        kuldve+=("ntfy")
+    else
+        hibak+=("ntfy")
+    fi
+fi
+
+if [[ -n "${DISCORD_WEBHOOK:-}" ]]; then
+    tartalom="$(printf '%s **%s — %s**\n%s' "$jel" "$GEP" "$cim" "$uzenet")"
+    payload="{\"content\":\"$(json_escape "$tartalom")\"}"
+    if curl -fsS -m 10 -H 'Content-Type: application/json' \
+        -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1; then
+        kuldve+=("discord")
+    else
+        hibak+=("discord")
+    fi
+fi
+
+if [[ -n "${ERTESITO_EMAIL:-}" ]]; then
+    if command -v mail >/dev/null 2>&1; then
+        printf '%s\n' "$uzenet" | mail -s "[$GEP] $cim" "$ERTESITO_EMAIL" 2>/dev/null \
+            && kuldve+=("email") || hibak+=("email")
+    elif command -v sendmail >/dev/null 2>&1; then
+        printf 'Subject: [%s] %s\n\n%s\n' "$GEP" "$cim" "$uzenet" \
+            | sendmail "$ERTESITO_EMAIL" 2>/dev/null \
+            && kuldve+=("email") || hibak+=("email")
+    else
+        hibak+=("email(nincs mail/sendmail)")
+    fi
+fi
+
+if [[ ${#kuldve[@]} -eq 0 && ${#hibak[@]} -eq 0 ]]; then
+    printf '%s  (nincs értesítési csatorna beállítva — lásd: NTFY_URL / DISCORD_WEBHOOK / ERTESITO_EMAIL a %s-ben)%s\n' \
+        "$G" "$ENV_FAJL" "$N"
+fi
+[[ ${#kuldve[@]} -gt 0 ]] && printf '%s  elküldve: %s%s\n' "$G" "${kuldve[*]}" "$N"
+[[ ${#hibak[@]}  -gt 0 ]] && printf '%s  sikertelen: %s%s\n' "$S" "${hibak[*]}" "$N" >&2
+
+exit 0

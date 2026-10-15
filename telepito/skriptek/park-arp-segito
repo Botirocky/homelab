@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+import fcntl
+import socket
+import struct
+import sys
+import time
+
+ETH_P_ARP = 0x0806
+SZUNET = 2.0
+
+
+def sajat_cim(iface):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    req = struct.pack("256s", iface.encode()[:15])
+    ip = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915, req)[20:24])
+    mac = fcntl.ioctl(s.fileno(), 0x8927, req)[18:24]
+    s.close()
+    return socket.inet_aton(ip), mac
+
+
+def alap_interfesz():
+    with open("/proc/net/route") as f:
+        for sor in f.readlines()[1:]:
+            mezok = sor.split()
+            if len(mezok) > 3 and mezok[1] == "00000000" and int(mezok[3], 16) & 2:
+                return mezok[0]
+    return None
+
+
+def main():
+    global IFACE
+    IFACE = sys.argv[1] if len(sys.argv) > 1 else None
+    while not IFACE:
+        IFACE = alap_interfesz()
+        if not IFACE:
+            time.sleep(10)
+    sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ARP))
+    sock.bind((IFACE, 0))
+    utolso = {}
+    frissitve = 0
+    ip, mac = b"", b""
+    print(f"park-arp-segito: figyelés {IFACE}", flush=True)
+    while True:
+        csomag = sock.recv(128)
+        if time.monotonic() - frissitve > 60:
+            try:
+                ip, mac = sajat_cim(IFACE)
+            except OSError:
+                time.sleep(5)
+                continue
+            frissitve = time.monotonic()
+        if len(csomag) < 42:
+            continue
+        op = struct.unpack("!H", csomag[20:22])[0]
+        kuldo_mac, kuldo_ip, cel_ip = csomag[22:28], csomag[28:32], csomag[38:42]
+        if op != 1 or cel_ip != ip or kuldo_ip == ip or kuldo_ip == b"\0\0\0\0":
+            continue
+        most = time.monotonic()
+        if most - utolso.get(kuldo_ip, 0) < SZUNET:
+            continue
+        utolso[kuldo_ip] = most
+        keret = (b"\xff" * 6 + mac + struct.pack("!H", ETH_P_ARP)
+                 + struct.pack("!HHBBH", 1, 0x0800, 6, 4, 1)
+                 + mac + ip + b"\0" * 6 + kuldo_ip)
+        sock.send(keret)
+        print(f"visszakérdezés: {socket.inet_ntoa(kuldo_ip)} ({kuldo_mac.hex(':')})", flush=True)
+
+
+if __name__ == "__main__":
+    main()

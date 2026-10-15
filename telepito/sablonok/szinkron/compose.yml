@@ -1,0 +1,44 @@
+# Fájlok böngészőből (FileBrowser) és automatikus szinkron (Syncthing).
+services:
+  filebrowser:
+    image: filebrowser/filebrowser:s6
+    container_name: park-filebrowser
+    restart: unless-stopped
+    ports:
+      - "8084:80"
+    volumes:
+      - ${TAROLO_DIR:-/srv/tarolok}:/srv
+      - ${ADAT_DIR}/filebrowser:/database
+      - ${ADAT_DIR}/filebrowser/config:/config
+    environment:
+      TZ: ${TZ}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+  syncthing:
+    image: lscr.io/linuxserver/syncthing:latest
+    container_name: park-syncthing
+    restart: unless-stopped
+    hostname: ${SYNCTHING_NEV:-park}
+    ports:
+      - "8384:8384"
+      - "22000:22000/tcp"
+      - "22000:22000/udp"
+      - "21027:21027/udp"
+    volumes:
+      - ${ADAT_DIR}/syncthing:/config
+      - ${SZINKRON_DIR:-${ADAT_DIR}/szinkron}:/data
+    environment:
+      TZ: ${TZ}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

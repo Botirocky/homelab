@@ -1,0 +1,81 @@
+# Iratok és olvasnivaló: Paperless-ngx (OCR archívum), Linkding, Wallabag.
+services:
+  paperless-redis:
+    image: redis:7-alpine
+    container_name: park-paperless-redis
+    restart: unless-stopped
+    volumes:
+      - ${ADAT_DIR}/paperless/redis:/data
+    networks: [park]
+
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    container_name: park-paperless
+    restart: unless-stopped
+    depends_on:
+      - paperless-redis
+    ports:
+      - "8088:8000"
+    volumes:
+      - ${ADAT_DIR}/paperless/data:/usr/src/paperless/data
+      - ${IRATOK_DIR}/media:/usr/src/paperless/media
+      - ${IRATOK_DIR}/export:/usr/src/paperless/export
+      - ${IRATOK_DIR}/consume:/usr/src/paperless/consume
+    environment:
+      TZ: ${TZ}
+      PAPERLESS_REDIS: redis://paperless-redis:6379
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY}
+      PAPERLESS_TIME_ZONE: ${TZ}
+      PAPERLESS_OCR_LANGUAGE: hun+eng
+      PAPERLESS_OCR_LANGUAGES: hun eng
+      PAPERLESS_URL: http://iratok.${BELSO_DOMAIN}
+      PAPERLESS_ADMIN_USER: ${PAPERLESS_FELHASZNALO:-admin}
+      PAPERLESS_ADMIN_PASSWORD: ${PAPERLESS_JELSZO}
+      PAPERLESS_TASK_WORKERS: "1"
+      PAPERLESS_THREADS_PER_WORKER: "1"
+      USERMAP_UID: ${PUID:-1000}
+      USERMAP_GID: ${PGID:-1000}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+  linkding:
+    image: sissbruecker/linkding:latest
+    container_name: park-linkding
+    restart: unless-stopped
+    ports:
+      - "9091:9090"
+    volumes:
+      - ${ADAT_DIR}/linkding:/etc/linkding/data
+    environment:
+      TZ: ${TZ}
+      LD_SUPERUSER_NAME: ${LINKDING_FELHASZNALO:-admin}
+      LD_SUPERUSER_PASSWORD: ${LINKDING_JELSZO}
+      LD_CSRF_TRUSTED_ORIGINS: http://konyvjelzo.${BELSO_DOMAIN}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+  wallabag:
+    image: wallabag/wallabag:latest
+    container_name: park-wallabag
+    restart: unless-stopped
+    ports:
+      - "8089:80"
+    volumes:
+      - ${ADAT_DIR}/wallabag/data:/var/www/wallabag/data
+      - ${ADAT_DIR}/wallabag/images:/var/www/wallabag/web/assets/images
+    environment:
+      TZ: ${TZ}
+      SYMFONY__ENV__DATABASE_DRIVER: pdo_sqlite
+      SYMFONY__ENV__DOMAIN_NAME: http://olvaso.${BELSO_DOMAIN}
+      SYMFONY__ENV__SERVER_NAME: "Szerverpark olvasó"
+      SYMFONY__ENV__SECRET: ${WALLABAG_SECRET}
+      SYMFONY__ENV__FOSUSER_REGISTRATION: "false"
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    networks: [park]
+
+networks:
+  park:
+    external: true

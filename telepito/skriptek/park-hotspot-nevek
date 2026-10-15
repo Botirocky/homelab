@@ -1,0 +1,25 @@
+#!/bin/sh
+set -u
+
+MAPPA="${HOTSPOT_NEVEK_DIR:-/opt/pihole/etc-pihole/hotspot-hosts}"
+FAJL="$MAPPA/hotspot"
+DOMAIN="hotspot.lan"
+
+muvelet="${1:-}"; ip="${3:-}"; nev="${4:-}"
+case "$muvelet" in add|old|del) ;; *) exit 0 ;; esac
+case "$ip" in *.*.*.*) ;; *) exit 0 ;; esac
+
+mkdir -p "$MAPPA"
+touch "$FAJL"
+tmp="$(mktemp "$MAPPA/.hotspot.XXXXXX")"
+grep -v "^$ip[[:space:]]" "$FAJL" > "$tmp" 2>/dev/null
+
+nev="$(printf '%s' "$nev" | tr -c 'A-Za-z0-9-' '-' | sed 's/^-*//; s/-*$//' | cut -c1-40)"
+if [ "$muvelet" != del ] && [ -n "$nev" ]; then
+    printf '%s %s %s.%s\n' "$ip" "$nev" "$nev" "$DOMAIN" >> "$tmp"
+fi
+
+chmod 644 "$tmp"
+if cmp -s "$tmp" "$FAJL"; then rm -f "$tmp"; else mv "$tmp" "$FAJL"; fi
+logger -t park-hotspot-nevek "$muvelet $ip ${nev:--}" 2>/dev/null
+exit 0

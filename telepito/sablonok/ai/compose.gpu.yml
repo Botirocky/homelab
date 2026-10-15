@@ -1,0 +1,19 @@
+# NVIDIA GPU-s kiegészítés – a telepítő csak akkor teszi ide, ha van kártya.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  comfyui:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

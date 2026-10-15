@@ -1,0 +1,37 @@
+table inet park_portal
+destroy table inet park_portal
+
+table inet park_portal {
+    set engedett {
+        type ether_addr
+        flags timeout
+    }
+
+    chain elo {
+        type nat hook prerouting priority dstnat - 5; policy accept;
+        iifname != "wlan0" return
+        ether saddr @engedett return
+        meta nfproto ipv4 tcp dport 80 dnat ip to 10.42.0.1:8077
+    }
+
+    chain be {
+        type filter hook input priority filter - 5; policy accept;
+        iifname != "wlan0" return
+        ether saddr @engedett return
+        ct state established,related accept
+        udp dport { 53, 67 } accept
+        tcp dport { 53, 8077 } accept
+        icmp type echo-request accept
+        meta l4proto ipv6-icmp accept
+        drop
+    }
+
+    chain tovabb {
+        type filter hook forward priority filter - 5; policy accept;
+        iifname != "wlan0" return
+        ether saddr @engedett return
+        ct state established,related accept
+        meta l4proto tcp reject with tcp reset
+        reject with icmpx admin-prohibited
+    }
+}
