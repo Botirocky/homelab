@@ -1,3 +1,10 @@
+__lazy_modules__ = [
+    "asyncio",
+    "os",
+    "sys",
+    "kasa",
+]
+
 import asyncio
 import os
 import sys

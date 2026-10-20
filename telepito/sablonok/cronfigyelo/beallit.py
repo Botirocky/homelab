@@ -1,3 +1,13 @@
+__lazy_modules__ = [
+    "json",
+    "os",
+    "datetime",
+    "django.contrib.auth.models",
+    "hc.accounts.models",
+    "hc.accounts.views",
+    "hc.api.models",
+]
+
 import json
 import os
 from datetime import timedelta

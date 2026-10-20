@@ -1,3 +1,18 @@
+__lazy_modules__ = [
+    "base64",
+    "hashlib",
+    "html",
+    "json",
+    "re",
+    "secrets",
+    "time",
+    "urllib.error",
+    "urllib.parse",
+    "urllib.request",
+    "html.parser",
+    "http.cookiejar",
+]
+
 import base64
 import hashlib
 import html

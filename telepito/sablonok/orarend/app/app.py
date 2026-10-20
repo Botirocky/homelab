@@ -1,3 +1,22 @@
+__lazy_modules__ = [
+    "hashlib",
+    "hmac",
+    "html",
+    "json",
+    "os",
+    "re",
+    "secrets",
+    "threading",
+    "time",
+    "traceback",
+    "urllib.parse",
+    "urllib.request",
+    "datetime",
+    "http.server",
+    "zoneinfo",
+    "kreta",
+]
+
 import hashlib
 import hmac
 import html

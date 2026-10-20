@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+__lazy_modules__ = [
+    "struct",
+    "sys",
+    "pathlib",
+    "PIL",
+]
+
 import struct
 import sys
 from pathlib import Path

@@ -16,6 +16,27 @@ Indítás:  python3 server.py
 Megnyitás:  http://localhost:8765  (HTTPS-sel: https://localhost:8765)
 """
 
+__lazy_modules__ = [
+    "argparse",
+    "asyncio",
+    "hashlib",
+    "hmac",
+    "http",
+    "json",
+    "logging",
+    "pathlib",
+    "re",
+    "secrets",
+    "ssl",
+    "time",
+    "urllib.request",
+    "collections",
+    "datetime",
+    "websockets",
+    "websockets.http11",
+    "websockets.datastructures",
+]
+
 import argparse
 import asyncio
 import hashlib
